@@ -112,6 +112,54 @@ impl RuleSet {
     pub fn home(&self) -> &Path {
         &self.home
     }
+
+    /// Every pattern in this rule set (defaults, extras, user excludes).
+    pub fn patterns(&self) -> Vec<String> {
+        let mut v: Vec<String> = self.kinds.keys().cloned().collect();
+        v.sort();
+        v
+    }
+
+    /// Translate the rule set into Kopia ignore rules for one source root,
+    /// so Kopia never uploads what the scan excluded (spec §10).
+    ///
+    /// Unanchored patterns (`node_modules/`, `*.tmp`) apply at any depth and
+    /// pass through unchanged. Home-anchored patterns (`/.npm/_cacache/`) are
+    /// re-anchored relative to the source: `/.npm/_cacache/` for a source at
+    /// `~/.npm` becomes `/_cacache/`; patterns outside the source are dropped.
+    pub fn kopia_ignore_rules_for(&self, source: &Path) -> Vec<String> {
+        let Ok(rel) = source.strip_prefix(&self.home) else {
+            // Outside home: only unanchored patterns can apply.
+            return self
+                .patterns()
+                .into_iter()
+                .filter(|p| !p.starts_with('/'))
+                .collect();
+        };
+        let rel_str = rel
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut out = Vec::new();
+        for p in self.patterns() {
+            if let Some(anchored) = p.strip_prefix('/') {
+                if rel_str.is_empty() {
+                    out.push(p.clone());
+                } else if let Some(rest) = anchored.strip_prefix(&format!("{rel_str}/")) {
+                    if !rest.is_empty() {
+                        out.push(format!("/{rest}"));
+                    }
+                }
+                // Anchored elsewhere: irrelevant to this source.
+            } else {
+                out.push(p.clone());
+            }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
 }
 
 /// A user rule is either a path (`~/Movies`, `/abs`) or a pattern (`node_modules/`).
@@ -223,6 +271,39 @@ mod tests {
             r.verdict(Path::new("/home/x/.local/state/moss/index.json"), false),
             Verdict::Exclude(ExclusionKind::OwnState)
         );
+    }
+
+    #[test]
+    fn kopia_rules_are_reanchored_per_source() {
+        let mut c = Config::default();
+        c.exclude.push(PathRule::new("~/Documents/big"));
+        c.exclude.push(PathRule::new("*.iso"));
+        let r = RuleSet::build(
+            &c,
+            Path::new("/home/x"),
+            &[(
+                PathBuf::from("/home/x/.local/state/moss"),
+                ExclusionKind::OwnState,
+            )],
+        )
+        .unwrap();
+        let docs = r.kopia_ignore_rules_for(Path::new("/home/x/Documents"));
+        assert!(docs.contains(&"node_modules/".to_string()));
+        assert!(docs.contains(&"*.iso".to_string()));
+        assert!(docs.contains(&"/big".to_string()), "{docs:?}");
+        assert!(
+            !docs.iter().any(|p| p.contains(".npm")),
+            "anchored elsewhere is dropped"
+        );
+        let npm = r.kopia_ignore_rules_for(Path::new("/home/x/.npm"));
+        assert!(npm.contains(&"/_cacache/".to_string()));
+        let cfg = r.kopia_ignore_rules_for(Path::new("/home/x/.config"));
+        assert!(cfg.contains(&"/**/Cache/".to_string()));
+        let local = r.kopia_ignore_rules_for(Path::new("/home/x/.local"));
+        assert!(local.contains(&"/state/moss".to_string()));
+        assert!(local.contains(&"/share/Trash/".to_string()));
+        let outside = r.kopia_ignore_rules_for(Path::new("/srv/data"));
+        assert!(outside.iter().all(|p| !p.starts_with('/')));
     }
 
     #[test]

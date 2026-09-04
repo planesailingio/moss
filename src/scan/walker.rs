@@ -58,6 +58,9 @@ struct Shared {
     out: WalkOutput,
     /// Per-directory direct aggregates, rolled up into subtree stats at the end.
     direct: BTreeMap<PathBuf, (u64, u64, u64, i64)>, // size, files, dirs, mtime
+    /// Absolute paths that were skipped; their ancestors are never cached so a
+    /// later run re-walks them and records the skip again.
+    skipped_abs: Vec<PathBuf>,
 }
 
 /// Walk one source root.
@@ -290,6 +293,10 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
         }
         subtree.insert(dir, st);
     }
+    // Skipped paths are not cacheable: drop every ancestor so the next run
+    // re-walks that chain and records the skip again (spec §11, §18).
+    let skipped_abs = std::mem::take(&mut s.skipped_abs);
+    subtree.retain(|dir, _| !skipped_abs.iter().any(|sk| sk.starts_with(dir)));
     s.out.dir_stats = subtree;
     s.out.skipped.sort_by(|a, b| a.path.cmp(&b.path));
     s.out.skipped.dedup();
@@ -339,6 +346,7 @@ impl IntoRaw for std::io::Error {
 fn record_error(shared: &Arc<Mutex<Shared>>, home: &Path, path: &Path, e: &std::io::Error) {
     let (reason, errno) = classify_io_error(e);
     let mut s = shared.lock().unwrap();
+    s.skipped_abs.push(path.to_path_buf());
     s.out.skipped.push(Skipped {
         path: home_relative(path, home),
         reason,
@@ -503,6 +511,52 @@ mod tests {
         assert_eq!(second.files, first.files);
         assert_eq!(second.size, first.size);
         assert_eq!(second.dir_stats.get(&home.join("git")).unwrap().files, 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn skipped_ancestors_are_not_cached() {
+        use std::os::unix::fs::PermissionsExt;
+        let (_tmp, home) = fixture();
+        let locked = home.join("git/app/locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let opts = |index| WalkOptions {
+            home: &home,
+            rules: &rules,
+            index,
+            counters: None,
+            threads: 1,
+            measure_excluded: false,
+            follow_links: false,
+        };
+        let first = walk_source(&home.join("git"), &opts(None));
+        let root_is_root = unsafe { libc::geteuid() } == 0;
+        if !root_is_root {
+            assert_eq!(first.skipped.len(), 1);
+            assert!(
+                !first.dir_stats.contains_key(&home.join("git/app")),
+                "ancestor of a skip is not cached"
+            );
+            assert!(
+                first.dir_stats.contains_key(&home.join("git/app/src")),
+                "siblings still cached"
+            );
+        }
+        let index = ScanIndex {
+            dirs: first.dir_stats.clone(),
+            ..ScanIndex::default()
+        };
+        let second = walk_source(&home.join("git"), &opts(Some(&index)));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if !root_is_root {
+            assert_eq!(
+                second.skipped.len(),
+                1,
+                "skip is recorded again on the cached run"
+            );
+        }
     }
 
     #[test]

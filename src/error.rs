@@ -107,6 +107,11 @@ pub enum MossError {
     )]
     AuthFailure { context: String },
 
+    #[error(
+        "A repository already exists at this location.\n\n{context}\n\nTo connect this machine to it, run `moss init` again and enter the recovery code from your sheet."
+    )]
+    RepositoryExists { context: String },
+
     #[error("No repository is configured.\n\nRun `moss init` first.")]
     NotConfigured,
 
@@ -167,6 +172,7 @@ impl MossError {
             MossError::KopiaVersion { .. } => ExitCode::KopiaVersion,
             MossError::RepositoryUnreachable { .. }
             | MossError::RepositoryNotInitialised { .. }
+            | MossError::RepositoryExists { .. }
             | MossError::NotConfigured => ExitCode::RepositoryUnavailable,
             MossError::AuthFailure { .. } => ExitCode::AuthFailure,
             MossError::Config(_) | MossError::Credential(_) => ExitCode::General,

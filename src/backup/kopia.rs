@@ -314,6 +314,11 @@ pub fn classify_failure(out: &KopiaOutput, context: &str) -> MossError {
             context: context.to_string(),
         };
     }
+    if err.contains("found existing data in storage location") {
+        return MossError::RepositoryExists {
+            context: context.to_string(),
+        };
+    }
     if err.contains("repository not initialized")
         || err.contains("not a kopia repository")
         || err.contains("kopia.repository")

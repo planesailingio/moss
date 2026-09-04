@@ -62,29 +62,24 @@ impl SnapshotManifest {
             .unwrap_or(0)
     }
 
+    /// Logical size of the tree. `rootEntry.summ` describes the whole tree;
+    /// `stats` describes this upload (cached files are not recounted), so the
+    /// summary is preferred.
     pub fn total_size(&self) -> u64 {
-        self.stats
+        self.root_entry
             .as_ref()
-            .and_then(|s| s.total_size)
-            .or_else(|| {
-                self.root_entry
-                    .as_ref()
-                    .and_then(|r| r.summ.as_ref())
-                    .and_then(|s| s.size)
-            })
+            .and_then(|r| r.summ.as_ref())
+            .and_then(|s| s.size)
+            .or_else(|| self.stats.as_ref().and_then(|s| s.total_size))
             .unwrap_or(0)
     }
 
     pub fn file_count(&self) -> u64 {
-        self.stats
+        self.root_entry
             .as_ref()
-            .and_then(|s| s.file_count)
-            .or_else(|| {
-                self.root_entry
-                    .as_ref()
-                    .and_then(|r| r.summ.as_ref())
-                    .and_then(|s| s.files)
-            })
+            .and_then(|r| r.summ.as_ref())
+            .and_then(|s| s.files)
+            .or_else(|| self.stats.as_ref().and_then(|s| s.file_count))
             .unwrap_or(0)
     }
 

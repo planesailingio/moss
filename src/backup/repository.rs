@@ -179,23 +179,31 @@ impl<'a> Repository<'a> {
         })
     }
 
-    pub fn set_ignore_errors_policy(&self, path: &Path) -> Result<()> {
+    /// Per-source policy: unreadable entries are recorded, not fatal (spec
+    /// §18), and moss's exclusions become Kopia ignore rules (spec §10).
+    ///
+    /// `--clear-ignore` must run in its own invocation: Kopia applies the
+    /// clear after the adds when both are given together (verified 0.23.1).
+    pub fn set_source_policy(&self, path: &Path, ignore_rules: &[String]) -> Result<()> {
         let p = path.display().to_string();
         check(
-            self.ctx.run(
-                self.password,
-                &[
-                    "policy",
-                    "set",
-                    &p,
-                    "--ignore-file-errors=true",
-                    "--ignore-dir-errors=true",
-                    "--ignore-unknown-types=true",
-                ],
-                &[],
-            )?,
+            self.ctx
+                .run(self.password, &["policy", "set", &p, "--clear-ignore"], &[])?,
             &self.context(),
         )?;
+        let mut args: Vec<String> = vec![
+            "policy".into(),
+            "set".into(),
+            p,
+            "--ignore-file-errors=true".into(),
+            "--ignore-dir-errors=true".into(),
+            "--ignore-unknown-types=true".into(),
+        ];
+        for r in ignore_rules {
+            args.push(format!("--add-ignore={r}"));
+        }
+        let refs: Vec<&str> = args.iter().map(String::as_str).collect();
+        check(self.ctx.run(self.password, &refs, &[])?, &self.context())?;
         Ok(())
     }
 
