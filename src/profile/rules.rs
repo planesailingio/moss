@@ -146,10 +146,10 @@ impl RuleSet {
             if let Some(anchored) = p.strip_prefix('/') {
                 if rel_str.is_empty() {
                     out.push(p.clone());
-                } else if let Some(rest) = anchored.strip_prefix(&format!("{rel_str}/")) {
-                    if !rest.is_empty() {
-                        out.push(format!("/{rest}"));
-                    }
+                } else if let Some(rest) = anchored.strip_prefix(&format!("{rel_str}/"))
+                    && !rest.is_empty()
+                {
+                    out.push(format!("/{rest}"));
                 }
                 // Anchored elsewhere: irrelevant to this source.
             } else {
