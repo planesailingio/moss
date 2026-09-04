@@ -79,6 +79,6 @@ file_mode() {
 run_moss() {
   local bin
   bin="$(moss_bin)" || return 1
-  echo "+ moss $*"
+  echo "+ moss $*" >&2
   "$bin" "$@"
 }
