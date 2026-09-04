@@ -47,7 +47,7 @@ fn open_reparse_aware(path: &Path, write: bool) -> io::Result<File> {
 fn attributes(file: &File) -> io::Result<(u32, u64, u64)> {
     let info = winapi_util::file::information(file)?;
     Ok((
-        info.file_attributes(),
+        info.file_attributes() as u32,
         info.volume_serial_number(),
         info.file_index(),
     ))

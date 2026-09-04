@@ -87,7 +87,8 @@ fn read_holder(file: &mut File) -> (u32, String) {
 #[cfg(unix)]
 pub fn process_alive(pid: u32) -> bool {
     // SAFETY: kill(2) with signal 0 only checks for existence.
-    unsafe { libc::kill(pid as libc::pid_t, 0) == 0 || *libc::__error() == libc::EPERM }
+    let rc = unsafe { libc::kill(pid as libc::pid_t, 0) };
+    rc == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
 }
 
 #[cfg(windows)]

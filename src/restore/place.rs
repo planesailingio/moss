@@ -534,7 +534,7 @@ pub fn check_collisions(
     check
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::config::ConflictPolicy;

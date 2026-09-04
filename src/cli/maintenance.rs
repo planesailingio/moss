@@ -190,6 +190,7 @@ pub fn verify(ctx: &AppContext, args: VerifyArgs) -> Result<ExitCode> {
 /// spec §12: ssh hard-fails on group/world-readable private keys; config must
 /// not be writable by others.
 pub fn check_credential_modes(home: &std::path::Path) -> Vec<String> {
+    #[cfg_attr(not(unix), allow(unused_mut))]
     let mut problems = Vec::new();
     #[cfg(unix)]
     {

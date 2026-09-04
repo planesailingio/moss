@@ -387,7 +387,7 @@ impl RootInner {
         match e.raw_os_error() {
             // Older glibc cannot chmod without following; open the entry
             // itself with O_NOFOLLOW (refusing a symlink) and fchmod the fd.
-            Some(libc::ENOTSUP) | Some(libc::EOPNOTSUPP) => {
+            Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP => {
                 let file = match open_at(dir.as_fd(), &name, libc::O_RDONLY, 0, full) {
                     Ok(f) => f,
                     Err(e)
