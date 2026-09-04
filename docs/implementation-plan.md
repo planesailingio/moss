@@ -4,6 +4,19 @@ Companion to [`spec.md`](../spec.md) revision 3 (2026-09-03). The spec says *wha
 says *in what order, in which files, and how each step is verified*. Section references (§n) are to
 the spec.
 
+## Status (2026-09-04)
+
+Steps 0–12 are implemented and committed. Verified on macOS 26.5.1 with Kopia 0.23.1: the
+full gate (`cargo fmt --check`, `cargo clippy -D warnings`, `cargo test`: 117 unit tests, 6
+end-to-end tests), the §39 walk by hand (`init`, `doctor`, `inspect`, `backup`, `snapshots`,
+`status`, `verify`, `restore` with dry-run, `--to`, conflict policies and exit codes), the
+second-machine bootstrap by recovery code, and both halves of the CI cross-platform script.
+
+Not yet verified: compilation on Linux and Windows (no cross toolchain on the dev machine; the
+Windows containment code has never been compiled), the GitHub Actions workflows themselves, the
+Homebrew tap push, S3 against MinIO, and the §38 open assumptions (`sync-to` reuse, ext4 on CI).
+The first push to GitHub exercises most of these.
+
 ## Scope
 
 This plan covers the §41 MVP. Phase 2 (§42) items are mentioned only where v1 must leave room for
