@@ -614,14 +614,14 @@ mod tests {
     #[test]
     fn places_tree_with_exact_modes_and_symlink_policy() {
         let fx = fixture();
-        // Cross-OS: the absolute link outside this home is skipped.
-        let out = run(
-            &fx,
-            ConflictPolicy::Skip,
-            Platform::Linux,
-            None,
-            &BTreeMap::new(),
-        );
+        // Cross-OS: the absolute link outside this home is skipped. Pick a
+        // source OS that differs from the host so the check fires everywhere.
+        let other_os = if Platform::current() == Platform::Linux {
+            Platform::MacOs
+        } else {
+            Platform::Linux
+        };
+        let out = run(&fx, ConflictPolicy::Skip, other_os, None, &BTreeMap::new());
         assert_eq!(out.placed, 4, "{out:?}"); // 3 files + relative link
         assert_eq!(out.skipped.len(), 1);
         assert!(out.skipped[0].reason.contains("symlink not supported here"));

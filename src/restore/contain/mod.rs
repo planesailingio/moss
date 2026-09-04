@@ -304,15 +304,17 @@ mod tests {
         }
 
         fn assert_refused(result: io::Result<impl std::fmt::Debug>, what: &str) {
+            // Linux `RESOLVE_IN_ROOT` re-roots an escaping symlink instead of
+            // refusing it: the write then either lands nowhere (ENOENT,
+            // because `<root>/outside` does not exist) or, for a `..` chain
+            // that climbs past the root, back inside the root itself. Either
+            // way nothing escapes, which the callers verify on disk.
+            let linux = cfg!(target_os = "linux");
             match result {
-                Ok(v) => panic!("{what}: expected refusal, got {v:?}"),
+                Ok(v) => assert!(linux, "{what}: expected refusal, got {v:?}"),
                 Err(e) => {
-                    // Linux `RESOLVE_IN_ROOT` re-roots an escaping symlink
-                    // instead of refusing it; the write then lands nowhere
-                    // (ENOENT) because `<root>/outside` does not exist. Either
-                    // way nothing escapes, which the callers also verify.
-                    let ok = is_containment_error(&e)
-                        || (cfg!(target_os = "linux") && e.kind() == io::ErrorKind::NotFound);
+                    let ok =
+                        is_containment_error(&e) || (linux && e.kind() == io::ErrorKind::NotFound);
                     assert!(ok, "{what}: unexpected error {e:?}");
                 }
             }

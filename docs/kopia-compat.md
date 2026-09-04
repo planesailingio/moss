@@ -64,7 +64,7 @@ Global flags on every invocation (`KopiaContext::command`):
 |---|---|
 | `--config-file=<state>/kopia/<repository id>.config` | moss owns Kopia's config; never collides with the user's own Kopia |
 | `--no-persist-credentials` | never write the base64 password sidecar |
-| `--no-use-keychain` | never touch the OS keychain from Kopia; moss owns credential storage |
+| `--no-use-keychain` | macOS only (the flag exists only in the macOS build of Kopia): never touch the Keychain from Kopia; moss owns credential storage |
 | `--no-progress` | no progress output on stderr |
 | `--disable-file-logging` | default: Kopia's debug-level file log records every path |
 | `--log-dir=<state>/kopia-logs` | instead of the above, under `--verbose` only |

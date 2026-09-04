@@ -76,6 +76,17 @@ fn moss(env: &Env) -> Command {
         .env("MOSS_HOSTNAME", "test-host")
         .env("MOSS_REPOSITORY_PASSWORD", RECOVERY)
         .env("NO_COLOR", "1");
+    #[cfg(windows)]
+    {
+        // PATHEXT lets a bare `kopia` resolve to kopia.exe; SYSTEMROOT and the
+        // temp dirs are needed by Windows itself and by Go binaries like Kopia.
+        for k in ["PATHEXT", "SYSTEMROOT", "TEMP", "TMP"] {
+            if let Some(v) = std::env::var_os(k) {
+                c.env(k, v);
+            }
+        }
+        c.env("USERPROFILE", &env.home);
+    }
     c
 }
 

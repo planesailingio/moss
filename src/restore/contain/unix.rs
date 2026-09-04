@@ -186,12 +186,20 @@ fn lstat_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<Option<Metadata>>
 }
 
 pub fn metadata_from_stat(st: &libc::stat) -> Metadata {
-    // `mode_t` is u16 on macOS and u32 on Linux; `From` is exact on both.
-    let mode = u32::from(st.st_mode);
-    let kind = match mode & u32::from(libc::S_IFMT) {
-        m if m == u32::from(libc::S_IFREG) => EntryKind::File,
-        m if m == u32::from(libc::S_IFDIR) => EntryKind::Dir,
-        m if m == u32::from(libc::S_IFLNK) => EntryKind::Symlink,
+    // `mode_t` is u16 on macOS and u32 on Linux, so the casts are needed on
+    // one platform and flagged as redundant on the other.
+    #[allow(clippy::unnecessary_cast)]
+    let (mode, fmt, reg, dir, lnk) = (
+        st.st_mode as u32,
+        libc::S_IFMT as u32,
+        libc::S_IFREG as u32,
+        libc::S_IFDIR as u32,
+        libc::S_IFLNK as u32,
+    );
+    let kind = match mode & fmt {
+        m if m == reg => EntryKind::File,
+        m if m == dir => EntryKind::Dir,
+        m if m == lnk => EntryKind::Symlink,
         _ => EntryKind::Other,
     };
     let secs = st.st_mtime;

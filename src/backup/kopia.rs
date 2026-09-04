@@ -102,7 +102,16 @@ pub fn find_binary() -> Result<PathBuf> {
         }
         return Err(MossError::KopiaNotFound);
     }
-    which::which("kopia").map_err(|_| MossError::KopiaNotFound)
+    if let Ok(p) = which::which("kopia") {
+        return Ok(p);
+    }
+    // `which` resolves a bare name on Windows via PATHEXT; a sparse
+    // environment (no PATHEXT) would otherwise miss `kopia.exe` on PATH.
+    #[cfg(windows)]
+    if let Ok(p) = which::which("kopia.exe") {
+        return Ok(p);
+    }
+    Err(MossError::KopiaNotFound)
 }
 
 /// Probe `kopia --version` once per process.
@@ -219,9 +228,12 @@ impl KopiaContext {
             cmd.arg("--disable-file-logging");
         }
         cmd.arg("--no-progress");
-        // Kopia's own persistence is never used (spec §6).
+        // Kopia's own persistence is never used (spec §6). The keychain flag
+        // only exists in the macOS build of Kopia; Linux and Windows reject it.
         cmd.arg("--no-persist-credentials");
-        cmd.arg("--no-use-keychain");
+        if cfg!(target_os = "macos") {
+            cmd.arg("--no-use-keychain");
+        }
         cmd.args(args);
         if connect {
             cmd.arg("--no-check-for-updates");
