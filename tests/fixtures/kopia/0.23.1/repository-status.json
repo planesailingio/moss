@@ -1,0 +1,46 @@
+{
+  "configFile": "/tmp/moss-fixture/cfg/repository.config",
+  "uniqueIDHex": "bfffa793925f96476ab26646212043cc52e122269daba14bdf01405c20bd9886",
+  "clientOptions": {
+    "hostname": "fixture-host",
+    "username": "fixture-user",
+    "description": "Repository in Filesystem: /tmp/moss-fixture/repo",
+    "enableActions": false,
+    "formatBlobCacheDuration": 900000000000
+  },
+  "storage": {
+    "type": "filesystem",
+    "config": {
+      "path": "/tmp/moss-fixture/repo",
+      "fileMode": 384,
+      "dirMode": 448,
+      "dirShards": null
+    }
+  },
+  "volume": {
+    "capacity": 1995165736960,
+    "available": 1616640155648
+  },
+  "contentFormat": {
+    "hash": "BLAKE2B-256-128",
+    "encryption": "AES256-GCM-HMAC-SHA256",
+    "version": 3,
+    "maxPackSize": 20971520,
+    "indexVersion": 2,
+    "epochParameters": {
+      "Enabled": true,
+      "EpochRefreshFrequency": 1200000000000,
+      "FullCheckpointFrequency": 7,
+      "CleanupSafetyMargin": 14400000000000,
+      "MinEpochDuration": 86400000000000,
+      "EpochAdvanceOnCountThreshold": 20,
+      "EpochAdvanceOnTotalSizeBytesThreshold": 10485760,
+      "DeleteParallelism": 4
+    },
+    "enablePasswordChange": true
+  },
+  "objectFormat": {
+    "splitter": "DYNAMIC-4M-BUZHASH"
+  },
+  "blobRetention": {}
+}

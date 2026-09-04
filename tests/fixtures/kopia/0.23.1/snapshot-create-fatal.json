@@ -1,0 +1,33 @@
+{
+  "id": "d9e9db38a8e85fee22ff20791fc78ca6",
+  "source": {
+    "host": "fixture-host",
+    "userName": "fixture-user",
+    "path": "/tmp/moss-fixture/src"
+  },
+  "description": "",
+  "startTime": "2026-09-04T12:18:55.894845Z",
+  "endTime": "2026-09-04T12:18:55.900033Z",
+  "rootEntry": {
+    "name": "src",
+    "type": "d",
+    "mode": "0755",
+    "mtime": "2026-09-04T12:18:55.483863701Z",
+    "uid": 501,
+    "obj": "k9e76bf3babaa972b8bf7fbdf9f4a8464",
+    "summ": {
+      "size": 12,
+      "files": 2,
+      "symlinks": 1,
+      "dirs": 2,
+      "maxTime": "2026-09-04T12:18:54.848335956Z",
+      "numFailed": 1,
+      "errors": [
+        {
+          "path": "noperm",
+          "error": "cannot create iterator: unable to read directory: open /tmp/moss-fixture/src/noperm: permission denied"
+        }
+      ]
+    }
+  }
+}

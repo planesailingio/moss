@@ -1,0 +1,32 @@
+{
+  "id": "75b224b4694aac0d843af1e698ee1410",
+  "source": {
+    "host": "fixture-host",
+    "userName": "fixture-user",
+    "path": "/tmp/moss-fixture/src"
+  },
+  "description": "",
+  "startTime": "2026-09-04T12:19:29.803668Z",
+  "endTime": "2026-09-04T12:19:29.808246Z",
+  "rootEntry": {
+    "name": "src",
+    "type": "d",
+    "mode": "0755",
+    "mtime": "2026-09-04T12:18:55.483863701Z",
+    "uid": 501,
+    "obj": "k0ec4c7c09e4fe6d68c9c2ac2c269a50f",
+    "summ": {
+      "size": 14,
+      "files": 3,
+      "symlinks": 1,
+      "dirs": 3,
+      "maxTime": "2026-09-04T12:18:55.484065909Z",
+      "numFailed": 0
+    }
+  },
+  "tags": {
+    "tag:moss-os": "macos",
+    "tag:moss-run": "01TEST",
+    "tag:moss-source": "test"
+  }
+}
