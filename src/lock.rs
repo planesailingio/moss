@@ -1,7 +1,7 @@
 //! The moss-level lock (spec §18): one `backup`/`restore`/`upload` at a time.
 
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 
 use crate::error::{MossError, Result};
@@ -24,15 +24,15 @@ impl Lock {
             .create(true)
             .truncate(false)
             .open(path)?;
-        match file.try_lock() {
-            Ok(()) => {}
-            Err(std::fs::TryLockError::WouldBlock) => {
+        match try_lock(&file) {
+            Ok(true) => {}
+            Ok(false) => {
                 let (pid, started) = read_holder(&mut file);
                 if pid != 0 && !process_alive(pid) {
                     // Stale lock from a killed process whose OS lock somehow
                     // persisted (should not happen; advisory locks die with the
                     // process). Retry once.
-                    file.lock()?;
+                    lock_blocking(&file)?;
                 } else {
                     return Err(MossError::AlreadyRunning {
                         pid,
@@ -41,7 +41,7 @@ impl Lock {
                     });
                 }
             }
-            Err(std::fs::TryLockError::Error(e)) => return Err(e.into()),
+            Err(e) => return Err(e.into()),
         }
         file.set_len(0)?;
         file.seek(SeekFrom::Start(0))?;
@@ -67,8 +67,90 @@ impl Lock {
 impl Drop for Lock {
     fn drop(&mut self) {
         let _ = self.file.set_len(0);
-        let _ = self.file.unlock();
+        let _ = unlock(&self.file);
     }
+}
+
+/// Try to take the lock without blocking. `Ok(false)` means another handle
+/// holds it.
+#[cfg(not(windows))]
+fn try_lock(file: &File) -> io::Result<bool> {
+    match file.try_lock() {
+        Ok(()) => Ok(true),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(false),
+        Err(std::fs::TryLockError::Error(e)) => Err(e),
+    }
+}
+
+#[cfg(not(windows))]
+fn lock_blocking(file: &File) -> io::Result<()> {
+    file.lock()
+}
+
+#[cfg(not(windows))]
+fn unlock(file: &File) -> io::Result<()> {
+    file.unlock()
+}
+
+// On Windows a `LockFileEx` range is mandatory: other handles cannot even
+// read the locked bytes, so contenders could never learn the holder's pid.
+// Lock a single byte far past any content instead, leaving the holder record
+// itself readable.
+#[cfg(windows)]
+const LOCK_OFFSET_HIGH: u32 = 0x4000_0000;
+
+#[cfg(windows)]
+fn lock_windows(file: &File, flags: u32) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::LockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    // SAFETY: OVERLAPPED is plain data; the handle is valid for `file`'s
+    // lifetime and the call is synchronous for a non-overlapped handle.
+    unsafe {
+        let mut ov: OVERLAPPED = std::mem::zeroed();
+        ov.Anonymous.Anonymous.Offset = 0;
+        ov.Anonymous.Anonymous.OffsetHigh = LOCK_OFFSET_HIGH;
+        if LockFileEx(file.as_raw_handle(), flags, 0, 1, 0, &mut ov) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn try_lock(file: &File) -> io::Result<bool> {
+    use windows_sys::Win32::Foundation::ERROR_LOCK_VIOLATION;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY,
+    };
+    match lock_windows(file, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY) {
+        Ok(()) => Ok(true),
+        Err(e) if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(false),
+        Err(e) => Err(e),
+    }
+}
+
+#[cfg(windows)]
+fn lock_blocking(file: &File) -> io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK;
+    lock_windows(file, LOCKFILE_EXCLUSIVE_LOCK)
+}
+
+#[cfg(windows)]
+fn unlock(file: &File) -> io::Result<()> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::UnlockFileEx;
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    // SAFETY: as in `lock_windows`.
+    unsafe {
+        let mut ov: OVERLAPPED = std::mem::zeroed();
+        ov.Anonymous.Anonymous.Offset = 0;
+        ov.Anonymous.Anonymous.OffsetHigh = LOCK_OFFSET_HIGH;
+        if UnlockFileEx(file.as_raw_handle(), 0, 1, 0, &mut ov) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
 }
 
 fn read_holder(file: &mut File) -> (u32, String) {

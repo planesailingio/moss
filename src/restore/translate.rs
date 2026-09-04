@@ -617,7 +617,7 @@ mod tests {
         assert_eq!(f[0].line, 1);
         assert_eq!(
             f[0].suggestion,
-            home.join(".ssh/id_ed25519").display().to_string()
+            home.join(".ssh").join("id_ed25519").display().to_string()
         );
     }
 }

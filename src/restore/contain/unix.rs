@@ -186,11 +186,12 @@ fn lstat_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<Option<Metadata>>
 }
 
 pub fn metadata_from_stat(st: &libc::stat) -> Metadata {
-    let mode = st.st_mode as u32;
-    let kind = match mode & (libc::S_IFMT as u32) {
-        m if m == libc::S_IFREG as u32 => EntryKind::File,
-        m if m == libc::S_IFDIR as u32 => EntryKind::Dir,
-        m if m == libc::S_IFLNK as u32 => EntryKind::Symlink,
+    // `mode_t` is u16 on macOS and u32 on Linux; `From` is exact on both.
+    let mode = u32::from(st.st_mode);
+    let kind = match mode & u32::from(libc::S_IFMT) {
+        m if m == u32::from(libc::S_IFREG) => EntryKind::File,
+        m if m == u32::from(libc::S_IFDIR) => EntryKind::Dir,
+        m if m == u32::from(libc::S_IFLNK) => EntryKind::Symlink,
         _ => EntryKind::Other,
     };
     let secs = st.st_mtime;
