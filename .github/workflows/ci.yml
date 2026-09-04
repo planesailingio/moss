@@ -1,0 +1,159 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Only the opt-in `s3` job keys off this; everything else runs on every push/PR too.
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The pinned Kopia (spec §5). scripts/install-kopia.sh installs exactly this
+  # version from the GitHub release assets; the JSON fixtures live under
+  # tests/fixtures/kopia/<KOPIA_VERSION>/. Bump both together.
+  KOPIA_VERSION: 0.23.1
+
+jobs:
+  lint-test:
+    name: lint & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Kopia
+        shell: bash
+        run: scripts/install-kopia.sh
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+      - name: Test
+        run: cargo test --all-features
+
+  msrv:
+    name: msrv (1.89)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --all-features
+
+  # Spec §39 Definition of Done: back up on one OS, restore on another against
+  # the same repository, and assert placement and modes. macOS produces the
+  # repository; Ubuntu and Windows consume it.
+  cross-platform-backup:
+    name: cross-platform backup (macos)
+    needs: lint-test
+    runs-on: macos-latest
+    # flip to false once Milestone 4 lands (the scripts are written against the
+    # init/backup/snapshots/restore CLI contract, which is still being built).
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Kopia
+        run: scripts/install-kopia.sh
+      - name: Build
+        run: cargo build --release
+      - name: Back up a fixture home
+        run: scripts/ci/cross-platform-backup.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: moss-xplat
+          path: ${{ runner.temp }}/moss-xplat/moss-xplat.tar.gz
+          if-no-files-found: error
+          retention-days: 3
+
+  cross-platform-restore:
+    name: cross-platform restore (${{ matrix.os }})
+    needs: cross-platform-backup
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    # flip to false once Milestone 4 lands
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Kopia
+        shell: bash
+        run: scripts/install-kopia.sh
+      - name: Build
+        run: cargo build --release
+      - uses: actions/download-artifact@v4
+        with:
+          name: moss-xplat
+          path: ${{ runner.temp }}/moss-xplat
+      - name: Restore on this OS and assert placement
+        shell: bash
+        run: scripts/ci/cross-platform-restore.sh
+
+  # Opt-in S3 tests against MinIO. Run from the Actions tab (workflow_dispatch).
+  s3:
+    name: s3 (MinIO)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    env:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin-ci-not-secret
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install pinned Kopia
+        run: scripts/install-kopia.sh
+      # `services:` cannot pass a command to the container and the official
+      # minio/minio image needs `server /data`, so start it explicitly.
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio -p 9000:9000 \
+            -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD \
+            minio/minio server /data
+          for _ in $(seq 1 30); do
+            if curl -fs http://localhost:9000/minio/health/live >/dev/null; then
+              echo "MinIO is up"; exit 0
+            fi
+            sleep 1
+          done
+          echo "MinIO did not become healthy" >&2
+          docker logs minio >&2 || true
+          exit 1
+      - name: S3 tests
+        env:
+          MOSS_S3_TEST_ENDPOINT: http://localhost:9000
+          AWS_ACCESS_KEY_ID: ${{ env.MINIO_ROOT_USER }}
+          AWS_SECRET_ACCESS_KEY: ${{ env.MINIO_ROOT_PASSWORD }}
+        run: cargo test --all-features -- --ignored s3
+
+  # Re-capture the Kopia JSON fixtures with the pinned Kopia and fail if their
+  # shape (keys, nesting, value types) drifted from what moss parses (spec §5).
+  kopia-json-diff:
+    name: kopia json fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned Kopia
+        run: scripts/install-kopia.sh
+      - name: Capture fixtures
+        run: scripts/capture-kopia-fixtures.sh "$RUNNER_TEMP/kopia-fixtures"
+      - name: Compare shapes with committed fixtures
+        run: scripts/ci/kopia-json-diff.sh "tests/fixtures/kopia/$KOPIA_VERSION" "$RUNNER_TEMP/kopia-fixtures"
+      - name: Upload captured fixtures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kopia-fixtures-${{ env.KOPIA_VERSION }}
+          path: ${{ runner.temp }}/kopia-fixtures
