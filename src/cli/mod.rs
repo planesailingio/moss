@@ -217,17 +217,21 @@ fn run(cli: Cli, console: Console) -> Result<ExitCode> {
     }
 }
 
-/// Shared helper: parse `--conflict` and config into a policy.
+/// Shared helper: parse `--conflict` and config into a policy (spec §16:
+/// interactive on a TTY, skip otherwise). An explicit `--conflict interactive`
+/// is honoured as asked and fails with exit 13 at the first conflict when no
+/// prompt is possible.
 pub fn conflict_policy(
     flag: Option<ConflictPolicy>,
     config: &Config,
     console: &Console,
 ) -> ConflictPolicy {
-    let policy = flag.unwrap_or(config.restore.conflict);
-    if policy == ConflictPolicy::Interactive && !console.can_prompt() {
-        ConflictPolicy::Skip
-    } else {
-        policy
+    match flag {
+        Some(p) => p,
+        None if config.restore.conflict == ConflictPolicy::Interactive && !console.can_prompt() => {
+            ConflictPolicy::Skip
+        }
+        None => config.restore.conflict,
     }
 }
 

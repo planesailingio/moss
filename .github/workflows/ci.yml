@@ -54,9 +54,8 @@ jobs:
     name: cross-platform backup (macos)
     needs: lint-test
     runs-on: macos-latest
-    # flip to false once Milestone 4 lands (the scripts are written against the
-    # init/backup/snapshots/restore CLI contract, which is still being built).
-    continue-on-error: true
+    # Gate: the cross-platform restore (spec §39) must pass.
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -82,8 +81,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest]
-    # flip to false once Milestone 4 lands
-    continue-on-error: true
+    continue-on-error: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

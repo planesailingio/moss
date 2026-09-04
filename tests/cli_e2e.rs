@@ -305,6 +305,122 @@ fn second_machine_bootstrap_requires_recovery_code() {
         .stdout(predicate::str::contains("\"runs\""));
 }
 
+#[test]
+fn restore_round_trip_with_conflicts_and_path_report() {
+    if !kopia_available() {
+        return;
+    }
+    let env = setup();
+    init(&env);
+    moss(&env)
+        .args(["backup", "--non-interactive", "--yes"])
+        .assert()
+        .success();
+
+    // Dry run writes nothing and exits 0.
+    moss(&env)
+        .args(["restore", "latest", "--dry-run", "--non-interactive"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Nothing was written"));
+
+    // Restore under --to: layout is home-relative, modes preserved, exit 0.
+    let dest = env._tmp.path().join("dest");
+    let out = moss(&env)
+        .args(["restore", "latest", "--to"])
+        .arg(&dest)
+        .args(["--conflict", "skip", "--non-interactive", "--json"])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(v["schema_version"], 1);
+    assert_eq!(v["totals"]["skipped"], 0);
+    assert_eq!(
+        fs::read_to_string(dest.join("Documents/a.txt")).unwrap(),
+        "hello"
+    );
+    assert!(
+        !dest.join("Documents/proj/node_modules").exists(),
+        "excluded at backup time"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(dest.join(".ssh/id_ed25519"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+    }
+    // The ssh config embeds the origin home; under --to that path still resolves
+    // on this machine, so no finding is expected. Point it somewhere that does not.
+    assert!(v["path_findings"].as_array().unwrap().is_empty());
+
+    // In-place restore of ssh with `backup` policy keeps the modified original aside.
+    let config = env.home.join(".ssh/config");
+    fs::write(&config, "Host changed\n").unwrap();
+    let out = moss(&env)
+        .args([
+            "restore",
+            "latest",
+            "--source",
+            "ssh",
+            "--conflict",
+            "backup",
+            "--non-interactive",
+            "--json",
+        ])
+        .assert()
+        .success();
+    let v: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert!(v["totals"]["conflicts"]["backed_up"].as_u64().unwrap() >= 1);
+    assert!(fs::read_to_string(&config).unwrap().starts_with("Host x"));
+    let backups = fs::read_dir(env.home.join(".ssh"))
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            e.file_name()
+                .to_string_lossy()
+                .starts_with("config.moss-backup-")
+        })
+        .count();
+    assert_eq!(backups, 1);
+
+    // Explicit interactive policy with no terminal is exit 13; skip policy on
+    // an existing file is exit 9 (something was skipped).
+    moss(&env)
+        .args([
+            "restore",
+            "latest",
+            "--source",
+            "ssh",
+            "--conflict",
+            "interactive",
+            "--non-interactive",
+        ])
+        .assert()
+        .code(13);
+    moss(&env)
+        .args([
+            "restore",
+            "latest",
+            "--source",
+            "ssh",
+            "--conflict",
+            "skip",
+            "--non-interactive",
+        ])
+        .assert()
+        .code(9);
+
+    // Journal and staging are cleaned up after a completed run.
+    assert!(!env.moss_home.join("state/restore-journal.json").exists());
+    assert!(!env.moss_home.join("state/staging").exists());
+}
+
 fn walk(dir: &Path) -> Vec<PathBuf> {
     let mut out = Vec::new();
     if let Ok(rd) = fs::read_dir(dir) {
