@@ -96,7 +96,7 @@ jobs:
         with:
           path: dist
           merge-multiple: true
-      - uses: softprops/action-gh-release@v2
+      - uses: softprops/action-gh-release@v3
         with:
           # v0.1.0-rc1 and friends are prereleases; the tap only follows finals.
           prerelease: ${{ contains(github.ref_name, '-') }}
