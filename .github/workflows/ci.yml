@@ -66,7 +66,7 @@ jobs:
         run: cargo build --release
       - name: Back up a fixture home
         run: scripts/ci/cross-platform-backup.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: moss-xplat
           path: ${{ runner.temp }}/moss-xplat/moss-xplat.tar.gz
@@ -91,7 +91,7 @@ jobs:
         run: scripts/install-kopia.sh
       - name: Build
         run: cargo build --release
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: moss-xplat
           path: ${{ runner.temp }}/moss-xplat
@@ -151,7 +151,7 @@ jobs:
         run: scripts/ci/kopia-json-diff.sh "tests/fixtures/kopia/$KOPIA_VERSION" "$RUNNER_TEMP/kopia-fixtures"
       - name: Upload captured fixtures
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: kopia-fixtures-${{ env.KOPIA_VERSION }}
           path: ${{ runner.temp }}/kopia-fixtures
