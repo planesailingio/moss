@@ -12,12 +12,20 @@
 #   write". Rotate by generating a new private key on the app's settings page
 #   and replacing the org secret; nothing else references it.
 #
+# Re-running the tap alone: Actions -> Release -> Run workflow -> version.
 # See docs/releasing.md for the release procedure and the dry run.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  # Re-run only the tap job for a release that is already published, e.g.
+  # after fixing the app credentials. build and release are skipped.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Published release to push to the tap, without the leading v (e.g. 0.7.1)"
+        required: true
 
 permissions:
   contents: write
@@ -28,6 +36,7 @@ env:
 jobs:
   build:
     name: build ${{ matrix.target }}
+    if: github.event_name == 'push'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -90,6 +99,7 @@ jobs:
   release:
     name: publish release
     needs: build
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v8
@@ -108,8 +118,17 @@ jobs:
   tap:
     name: update homebrew tap
     needs: release
-    if: ${{ !contains(github.ref_name, '-') }}
+    # Runs after a successful release on a final tag, or on a manual dispatch
+    # (release is then skipped, so needs.release.result alone would skip us).
+    if: >-
+      ${{ !cancelled()
+          && (needs.release.result == 'success' || github.event_name == 'workflow_dispatch')
+          && !contains(inputs.version || github.ref_name, '-') }}
     runs-on: ubuntu-latest
+    env:
+      # Tag name on push (v0.7.1) or the dispatch input (0.7.1); the script
+      # strips a leading v either way.
+      VERSION: ${{ inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - name: Mint tap app token
@@ -120,7 +139,13 @@ jobs:
           private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
           owner: planesailingio
           repositories: homebrew-tools
+      - name: Explain a failed token mint
+        if: ${{ failure() && steps.tap-token.outcome == 'failure' }}
+        run: |
+          echo "::error::Could not mint an installation token for planesailingio/homebrew-tools."
+          echo "::error::'Not Found ... get-a-repository-installation' means the tap GitHub App is not installed on homebrew-tools (org settings -> GitHub Apps -> the app -> Install App / Configure -> add homebrew-tools). A JWT or signature error means TAP_APP_ID and TAP_APP_PRIVATE_KEY do not belong to the same app."
+          exit 1
       - name: Render Formula/moss.rb and push to planesailingio/homebrew-tools
         env:
           GH_TOKEN: ${{ steps.tap-token.outputs.token }}
-        run: MOSS_TAP_CONFIRM=1 scripts/update-tap.sh "${GITHUB_REF_NAME#v}"
+        run: MOSS_TAP_CONFIRM=1 scripts/update-tap.sh "${VERSION#v}"

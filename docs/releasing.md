@@ -59,10 +59,15 @@ One-time setup, all in the GitHub UI:
    Generate a private key, which downloads a `.pem` file. The client secret
    is for the OAuth login flow and is not used here.
 3. Install app → Only select repositories → `planesailingio/homebrew-tools`.
+   Check it took: Org Settings → GitHub Apps should list the app, and its
+   Configure page must show `homebrew-tools` under repository access. Creating
+   the app does not install it, and without this step every tap push fails
+   with `Not Found` on the installation lookup.
 4. Org Settings → Secrets and variables → Actions. Create the variable
    `TAP_APP_ID` (the App ID) and the secret `TAP_APP_PRIVATE_KEY` (the full
    `.pem` contents, including the BEGIN and END lines). Set both to
-   "Selected repositories" and include `moss`.
+   "Selected repositories" and include every repository that pushes to the
+   tap: `moss` and `twig`.
 
 Commits pushed this way are authored by the app's bot user. Rotate by
 generating a new private key on the app page and replacing the org secret.
@@ -101,6 +106,25 @@ generating a new private key on the app page and replacing the org secret.
 
 ## If the tap push fails
 
-The release itself is already published; re-run only the `tap` job from the
-Actions UI once the cause (usually the app credentials) is fixed, or run
-`scripts/update-tap.sh <version>` locally and confirm the push.
+The release itself is already published, so only the tap needs another go.
+Once the cause is fixed, either:
+
+- Actions → Release → Run workflow, enter the version without the leading
+  `v` (for example `0.7.1`). `build` and `release` are skipped and only `tap`
+  runs. This works for any published version, including tags pushed before
+  the app existed.
+- Or "Re-run failed jobs" on the original run.
+- Or run `scripts/update-tap.sh <version>` locally and confirm the push.
+
+The script is idempotent: if the tap already carries that version it reports
+"nothing to push" and exits 0.
+
+Failure signatures from the "Mint tap app token" step:
+
+- `Not Found - .../apps#get-a-repository-installation-for-the-authenticated-app`
+  — the app authenticated but is not installed on `homebrew-tools`. Setup
+  step 3 above.
+- A JWT, signature or `Bad credentials` error — `TAP_APP_ID` and
+  `TAP_APP_PRIVATE_KEY` do not belong to the same app. Steps 2 and 4.
+- A missing-input error — the variable or secret is not shared with this
+  repository. Step 4.
