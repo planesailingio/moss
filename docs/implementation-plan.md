@@ -271,9 +271,11 @@ Mirror the workflows in `planesailingio/twig` (`.github/workflows/ci.yml`, `rele
 - `tap` job, `needs: release`, skipped for prereleases: runs `MOSS_TAP_CONFIRM=1
   scripts/update-tap.sh <version>`, which fetches the four Unix sidecars from the published
   release, renders `Formula/moss.rb`, clones `homebrew-tools` and pushes. It authenticates with a
-  repository secret `HOMEBREW_TOOLS_TOKEN`: a fine-grained PAT scoped to `homebrew-tools` with
-  contents read/write. The default `GITHUB_TOKEN` cannot push to another repository. Twig's script
-  keeps the interactive confirmation for local use; the workflow sets the confirm variable.
+  short-lived installation token for the org's tap GitHub App, minted by
+  `actions/create-github-app-token` from the org variable `TAP_APP_ID` and secret
+  `TAP_APP_PRIVATE_KEY` (see `docs/releasing.md`). The default `GITHUB_TOKEN` cannot push to another
+  repository. Twig's script keeps the interactive confirmation for local use; the workflow sets the
+  confirm variable.
 
 ### `Formula/moss.rb`
 

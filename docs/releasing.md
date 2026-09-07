@@ -40,17 +40,32 @@ tap.
   (binary-only, `depends_on "kopia"`), clones the tap, commits
   `moss <version>` and pushes.
 
-### The `HOMEBREW_TOOLS_TOKEN` secret
+### The tap GitHub App
 
 The `tap` job pushes to a different repository, which the default
-`GITHUB_TOKEN` cannot do. Create a fine-grained personal access token with:
-
-- Repository access: only `planesailingio/homebrew-tools`
-- Permissions: Contents — read and write
-
-and store it as the repository secret `HOMEBREW_TOOLS_TOKEN` on
-`planesailingio/moss`. The script clones and pushes over
+`GITHUB_TOKEN` cannot do: it is scoped to the repository the workflow runs
+in, and no setting extends it. The job instead mints a one-hour installation
+token for a GitHub App owned by the `planesailingio` org, using
+`actions/create-github-app-token`, and passes it to the script as `GH_TOKEN`.
+The script clones and pushes over
 `https://x-access-token:${GH_TOKEN}@github.com/planesailingio/homebrew-tools.git`.
+
+One-time setup, all in the GitHub UI:
+
+1. Org Settings → Developer settings → GitHub Apps → New GitHub App. Untick
+   Webhook. Repository permissions: Contents — read and write, nothing else
+   (Metadata read is added automatically). Install only on this account.
+2. On the new app's page, note the App ID (or client ID; either works) and
+   Generate a private key, which downloads a `.pem` file. The client secret
+   is for the OAuth login flow and is not used here.
+3. Install app → Only select repositories → `planesailingio/homebrew-tools`.
+4. Org Settings → Secrets and variables → Actions. Create the variable
+   `TAP_APP_ID` (the App ID) and the secret `TAP_APP_PRIVATE_KEY` (the full
+   `.pem` contents, including the BEGIN and END lines). Set both to
+   "Selected repositories" and include `moss`.
+
+Commits pushed this way are authored by the app's bot user. Rotate by
+generating a new private key on the app page and replacing the org secret.
 
 ## Dry run before the first real release
 
@@ -87,5 +102,5 @@ and store it as the repository secret `HOMEBREW_TOOLS_TOKEN` on
 ## If the tap push fails
 
 The release itself is already published; re-run only the `tap` job from the
-Actions UI once the cause (usually the token) is fixed, or run
+Actions UI once the cause (usually the app credentials) is fixed, or run
 `scripts/update-tap.sh <version>` locally and confirm the push.

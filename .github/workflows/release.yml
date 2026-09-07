@@ -1,14 +1,16 @@
 # Release: build archives for five targets on a `v*` tag, publish them as a
 # GitHub release, then update the Homebrew tap.
 #
-# Secrets:
-#   HOMEBREW_TOOLS_TOKEN — a fine-grained personal access token scoped to the
-#   single repository planesailingio/homebrew-tools with "Contents: read and
-#   write" permission. The `tap` job uses it to clone and push
-#   Formula/moss.rb. The default GITHUB_TOKEN cannot push to another
-#   repository, which is why a dedicated secret is needed. Rotate it by
-#   creating a new token with the same scope and replacing the repository
-#   secret; nothing else references it.
+# Credentials:
+#   The `tap` job pushes to planesailingio/homebrew-tools, which the default
+#   GITHUB_TOKEN cannot do (it is scoped to this repository only). It mints a
+#   short-lived installation token for the org's tap GitHub App instead, from
+#   two org-level values shared with the tool repositories:
+#     vars.TAP_APP_ID              — the app's App ID or client ID (not secret)
+#     secrets.TAP_APP_PRIVATE_KEY  — the app's private key (.pem contents)
+#   The app is installed on homebrew-tools only, with "Contents: read and
+#   write". Rotate by generating a new private key on the app's settings page
+#   and replacing the org secret; nothing else references it.
 #
 # See docs/releasing.md for the release procedure and the dry run.
 name: Release
@@ -110,7 +112,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Mint tap app token
+        id: tap-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.TAP_APP_ID }}
+          private-key: ${{ secrets.TAP_APP_PRIVATE_KEY }}
+          owner: planesailingio
+          repositories: homebrew-tools
       - name: Render Formula/moss.rb and push to planesailingio/homebrew-tools
         env:
-          GH_TOKEN: ${{ secrets.HOMEBREW_TOOLS_TOKEN }}
+          GH_TOKEN: ${{ steps.tap-token.outputs.token }}
         run: MOSS_TAP_CONFIRM=1 scripts/update-tap.sh "${GITHUB_REF_NAME#v}"

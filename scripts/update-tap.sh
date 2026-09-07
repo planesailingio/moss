@@ -9,8 +9,8 @@
 #
 # Requires: a published GitHub release v<version> with the .sha256 sidecar
 # files for the four Unix archives. When GH_TOKEN is set (the release workflow
-# passes the HOMEBREW_TOOLS_TOKEN secret) it is used to clone and push the tap;
-# otherwise the local git credential helper is used.
+# passes a GitHub App installation token) it is used to clone and push the
+# tap; otherwise the local git credential helper is used.
 set -euo pipefail
 
 VERSION="${1:?usage: update-tap.sh <version> (without leading v)}"
