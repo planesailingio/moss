@@ -94,7 +94,7 @@ pub fn run(ctx: &AppContext, args: BackupArgs) -> Result<ExitCode> {
     }
 
     let run_id = crate::backup::tags::new_run_id();
-    let kopia_version = crate::backup::kopia::version(&connected.kopia.binary)?.display();
+    let kopia_version = crate::backup::kopia::version(connected.kopia.binary())?.display();
     let manifest = run::build_manifest(&run_id, config, &host, &kopia_version, &selected, &result);
 
     if ctx.global.dry_run {

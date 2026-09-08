@@ -154,7 +154,7 @@ fn refresh_sources(ctx: &AppContext, cfg: &mut crate::config::Config) {
 pub fn recovery(ctx: &AppContext, args: RecoveryArgs) -> Result<ExitCode> {
     let RecoverySubcommand::Show = args.command;
     let connected = ctx.connect()?;
-    let kopia_version = crate::backup::kopia::version(&connected.kopia.binary)
+    let kopia_version = crate::backup::kopia::version(connected.kopia.binary())
         .map(|v| v.display())
         .unwrap_or_else(|_| "?".into());
     let sheet = recovery::format_sheet(
@@ -208,8 +208,7 @@ pub fn kopia(ctx: &AppContext, args: KopiaArgs) -> Result<ExitCode> {
         ));
     }
     let connected = ctx.connect()?;
-    let refs: Vec<&str> = args.args.iter().map(String::as_str).collect();
-    let out = connected.repository().passthrough(&refs)?;
+    let out = connected.repository().passthrough(&args.args)?;
     print!("{}", out.stdout);
     eprint!("{}", out.stderr);
     Ok(if out.success() {

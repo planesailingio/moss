@@ -6,6 +6,7 @@ pub mod backup;
 pub mod cli;
 pub mod config;
 pub mod credentials;
+pub mod doctor;
 pub mod endpoints;
 pub mod error;
 pub mod lock;

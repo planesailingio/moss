@@ -3,7 +3,7 @@
 
 use clap::{Args, Subcommand};
 
-use crate::backup::kopia::{self, KopiaContext};
+use crate::backup::kopia::{self, KopiaRunner};
 use crate::backup::repository::{Repository, S3Credentials};
 use crate::cli::AppContext;
 use crate::cli::context::{parse_repository_url, repository_id};
@@ -129,7 +129,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
     config.profile.identity = identity.clone();
 
     // Credential store.
-    let store = credentials::store_for(repo.credential_store);
+    let store = ctx.store(repo.credential_store);
     if repo.credential_store == CredentialStoreKind::Keyring {
         if let Err(e) = store.probe() {
             return Err(MossError::Credential(format!(
@@ -142,13 +142,8 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
         ));
     }
 
-    let kopia_ctx = KopiaContext::new(
-        &ctx.paths,
-        &repo.id,
-        ctx.global.verbose > 0,
-        ctx.global.skip_version_check,
-    )?;
-    let kopia_version = kopia::check_version(&kopia_ctx.binary, ctx.global.skip_version_check)?;
+    let kopia_ctx = ctx.kopia_runner(&repo.id)?;
+    let kopia_version = kopia::check_version(kopia_ctx.binary(), ctx.options.skip_version_check)?;
     let s3 = if repo.kind == RepositoryType::S3 {
         s3_credentials(ctx)?
     } else {
@@ -162,11 +157,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
     console.line("Generating repository encryption key...");
     let (password, created) = match existing {
         Some(pw) => {
-            let r = Repository {
-                ctx: &kopia_ctx,
-                config: &repo,
-                password: &pw,
-            };
+            let r = Repository::new(kopia_ctx.as_ref(), &repo, &pw);
             match r.connect(s3.as_ref()) {
                 Ok(()) => {
                     console.line("Connected to the existing repository with the stored password.");
@@ -180,18 +171,14 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
                     (pw, true)
                 }
                 Err(MossError::AuthFailure { .. }) => {
-                    bootstrap(ctx, &kopia_ctx, &repo, s3.as_ref(), store.as_ref())?
+                    bootstrap(ctx, kopia_ctx.as_ref(), &repo, s3.as_ref(), store.as_ref())?
                 }
                 Err(e) => return Err(e),
             }
         }
         None => {
             let pw = recovery::generate()?;
-            let r = Repository {
-                ctx: &kopia_ctx,
-                config: &repo,
-                password: &pw,
-            };
+            let r = Repository::new(kopia_ctx.as_ref(), &repo, &pw);
             match r.create(s3.as_ref()) {
                 Ok(()) => {
                     store.set_password(&repo.id, &pw)?;
@@ -199,14 +186,14 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
                 }
                 Err(MossError::RepositoryExists { .. }) => {
                     console.line("A repository already exists at this location.");
-                    bootstrap(ctx, &kopia_ctx, &repo, s3.as_ref(), store.as_ref())?
+                    bootstrap(ctx, kopia_ctx.as_ref(), &repo, s3.as_ref(), store.as_ref())?
                 }
                 Err(e) => return Err(e),
             }
         }
     };
     // Kopia's config holds storage details (and S3 keys); keep it private (spec §5).
-    crate::config::paths::make_private_file(&kopia_ctx.config_file)?;
+    crate::config::paths::make_private_file(kopia_ctx.config_file())?;
 
     // Discovery (spec §8): written into config so the user can see and edit it.
     config.sources = discovery::discover(adapter, &config);
@@ -294,7 +281,7 @@ fn finish(ctx: &AppContext, config: &Config, console: &crate::output::Console) -
 /// Second-machine bootstrap (spec §6): the recovery code is the only input.
 fn bootstrap(
     ctx: &AppContext,
-    kopia_ctx: &KopiaContext,
+    kopia_ctx: &dyn KopiaRunner,
     repo: &crate::config::RepositoryConfig,
     s3: Option<&S3Credentials>,
     store: &dyn credentials::CredentialStore,
@@ -315,11 +302,7 @@ fn bootstrap(
                 continue;
             }
         };
-        let r = Repository {
-            ctx: kopia_ctx,
-            config: repo,
-            password: &pw,
-        };
+        let r = Repository::new(kopia_ctx, repo, &pw);
         match r.connect(s3) {
             Ok(()) => {
                 store.set_password(&repo.id, &pw)?;

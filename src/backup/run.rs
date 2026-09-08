@@ -212,3 +212,178 @@ pub fn execute(
         unexpected_errors: unexpected,
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backup::kopia::testing::FixtureRunner;
+    use crate::backup::manifest::MANIFEST_SCHEMA_VERSION;
+    use crate::config::{RepositoryConfig, RepositoryType};
+    use crate::model::{Inclusion, Platform, Portability, ProfileCategory, SemanticId};
+    use crate::profile::rules::RuleSet;
+    use crate::security::secret::Secret;
+
+    fn source(home: &Path) -> ProfileSource {
+        ProfileSource {
+            id: SemanticId::new("test"),
+            path: home.join("src"),
+            category: ProfileCategory::PersonalData,
+            platform: Platform::MacOs,
+            reason: "test".into(),
+            default_action: Inclusion::Include,
+            sensitive: false,
+            portable: Portability::Portable,
+        }
+    }
+
+    fn manifest(home: &Path, source: &ProfileSource) -> Manifest {
+        Manifest {
+            schema_version: MANIFEST_SCHEMA_VERSION,
+            run_id: "01TEST".into(),
+            profile: "default".into(),
+            profile_identity: "tester".into(),
+            source_os: Platform::MacOs,
+            source_host: "host".into(),
+            source_user: "tester".into(),
+            source_home: home.display().to_string(),
+            tool_version: "0.0.0".into(),
+            kopia_version: "0.23.1".into(),
+            created_at: chrono::Utc::now(),
+            categories: vec![source.category],
+            sources: vec![ManifestSource {
+                id: source.id.clone(),
+                category: source.category,
+                portable: source.portable,
+                path: source.home_relative(home),
+                sensitive: false,
+                size: 14,
+                files: 3,
+                snapshot_id: None,
+                fatal_errors: 0,
+                ignored_errors: 0,
+            }],
+            skipped: Vec::new(),
+            collisions: Vec::new(),
+            sensitive_counts: Vec::new(),
+            totals: Totals::default(),
+        }
+    }
+
+    fn repo_config() -> RepositoryConfig {
+        RepositoryConfig {
+            kind: RepositoryType::Filesystem,
+            id: "x".into(),
+            path: Some("/tmp/r".into()),
+            bucket: None,
+            prefix: None,
+            endpoint: None,
+            region: None,
+            tls: None,
+            credential_store: Default::default(),
+            recovery_acknowledged_at: None,
+            created_at: None,
+            local: None,
+        }
+    }
+
+    /// Run `execute` with the manifest snapshot answered by the clean fixture
+    /// and the source snapshot by `source_fixture`.
+    fn run_with(
+        source_fixture: &str,
+        exit: i32,
+    ) -> (RunOutcome, Vec<Vec<String>>, tempfile::TempDir) {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        std::fs::create_dir_all(home.join("src")).unwrap();
+        let runner = FixtureRunner::new()
+            .on_fixture(
+                &["snapshot", "create", "moss-source:manifest"],
+                "snapshot-create-clean.json",
+                0,
+            )
+            .on_fixture(&["snapshot", "create"], source_fixture, exit);
+        let cfg = repo_config();
+        let pw = Secret::new("pw");
+        let repo = Repository::new(&runner, &cfg, &pw);
+        let src = source(&home);
+        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let outcome = execute(
+            &repo,
+            &tmp.path().join("manifests"),
+            manifest(&home, &src),
+            &[&src],
+            &rules,
+        )
+        .unwrap();
+        (outcome, runner.calls(), tmp)
+    }
+
+    #[test]
+    fn clean_run_is_complete() {
+        let (outcome, calls, _tmp) = run_with("snapshot-create-clean.json", 0);
+        assert!(outcome.complete);
+        assert!(outcome.skipped.is_empty());
+        assert_eq!(outcome.unexpected_errors, 0);
+        assert_eq!(outcome.snapshots.len(), 1);
+        assert_eq!(
+            outcome.snapshots[0].snapshot_id,
+            "75b224b4694aac0d843af1e698ee1410"
+        );
+        assert_eq!(outcome.snapshots[0].files, 3);
+        assert!(outcome.manifest_path.is_file());
+        // Policies first (clear, then set) for the source and the manifest
+        // dir, then one snapshot per source, then the manifest snapshot.
+        let verbs: Vec<String> = calls.iter().map(|c| c[..2].join(" ")).collect();
+        assert_eq!(
+            verbs,
+            vec![
+                "policy set",
+                "policy set",
+                "policy set",
+                "policy set",
+                "snapshot create",
+                "snapshot create"
+            ]
+        );
+        assert!(calls[0].contains(&"--clear-ignore".to_string()));
+        assert!(calls[1].iter().any(|a| a == "--ignore-file-errors=true"));
+        let manifest_call = calls.last().unwrap();
+        assert!(manifest_call.contains(&"moss-source:manifest".to_string()));
+        assert!(manifest_call.iter().any(|a| a == "moss-run:01TEST"));
+    }
+
+    /// Kopia exits 1 on a fatal error but still prints the manifest; the run
+    /// is incomplete (exit 9 in the CLI), never an error, and the failing path
+    /// is folded into `skipped`.
+    #[test]
+    fn fatal_error_is_partial_not_failed() {
+        let (outcome, _, _tmp) = run_with("snapshot-create-fatal.json", 1);
+        assert!(!outcome.complete);
+        assert_eq!(outcome.unexpected_errors, 1);
+        assert_eq!(outcome.snapshots[0].fatal_errors, 1);
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].path, "~/src/noperm");
+        assert_eq!(outcome.skipped[0].reason, SkipReason::BackupError);
+        assert!(
+            outcome.skipped[0]
+                .detail
+                .as_deref()
+                .unwrap()
+                .contains("permission denied")
+        );
+        // The manifest on disk carries the same skipped entry.
+        let written = Manifest::read(&outcome.manifest_path).unwrap();
+        assert_eq!(written.skipped.len(), 1);
+        assert_eq!(written.sources[0].fatal_errors, 1);
+        assert!(written.sources[0].snapshot_id.is_some());
+    }
+
+    /// Ignored errors exit 0 in Kopia but still count against completeness.
+    #[test]
+    fn ignored_errors_are_counted() {
+        let (outcome, _, _tmp) = run_with("snapshot-create-ignored-errors.json", 0);
+        assert!(!outcome.complete);
+        assert_eq!(outcome.snapshots[0].ignored_errors, 1);
+        assert_eq!(outcome.skipped.len(), 1);
+    }
+}

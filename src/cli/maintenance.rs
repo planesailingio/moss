@@ -77,7 +77,7 @@ pub fn status(ctx: &AppContext) -> Result<ExitCode> {
                 "Credentials:".into(),
                 match connected.credential_source {
                     crate::credentials::CredentialSource::Environment => "environment".into(),
-                    crate::credentials::CredentialSource::Keyring => connected.store.name().into(),
+                    crate::credentials::CredentialSource::Keyring => connected.store_name.into(),
                 }
             ),
             (

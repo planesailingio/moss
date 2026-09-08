@@ -2,12 +2,17 @@
 //!
 //! One function builds every command line and child environment. The parent
 //! environment is never copied wholesale; the password reaches the child via
-//! `KOPIA_PASSWORD` only and is zeroised after spawn.
+//! `KOPIA_PASSWORD` only. The `Command` holding that copy is dropped as soon
+//! as the child exits, but `std::process::Command` does not zeroise its
+//! environment, so the copy is freed rather than scrubbed; only the `Secret`
+//! it was read from is zeroised on drop.
 
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
+use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
-use std::sync::OnceLock;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::config::MossPaths;
 use crate::error::{MossError, Result};
@@ -16,6 +21,11 @@ use crate::security::secret::Secret;
 /// Tested Kopia range (spec §5). Update both together with the fixtures.
 pub const KOPIA_MIN: (u64, u64, u64) = (0, 23, 0);
 pub const KOPIA_MAX_MINOR: (u64, u64) = (0, 23);
+
+/// How long a metadata command (`repository status`, `maintenance info`,
+/// `--version`) may take before moss gives up on it. Long-running verbs
+/// (`snapshot create|restore|verify`, `maintenance run`) have no limit.
+pub const METADATA_TIMEOUT: Duration = Duration::from_secs(60);
 
 pub fn version_range_display() -> String {
     format!(
@@ -67,6 +77,72 @@ impl KopiaVersion {
     }
 }
 
+/// Per-invocation knobs for one Kopia command.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RunOptions {
+    /// `repository create|connect`: adds the cache-directory and update-check
+    /// flags and prepares moss's Kopia directories first.
+    pub connect: bool,
+    /// Kill the child and fail if it has not exited by then. `None` for
+    /// commands whose duration is data-dependent.
+    pub timeout: Option<Duration>,
+}
+
+impl RunOptions {
+    /// A short metadata query that must answer promptly.
+    pub fn metadata() -> RunOptions {
+        RunOptions {
+            connect: false,
+            timeout: Some(METADATA_TIMEOUT),
+        }
+    }
+
+    pub fn connect() -> RunOptions {
+        RunOptions {
+            connect: true,
+            timeout: None,
+        }
+    }
+}
+
+/// Anything that can run Kopia for moss. `KopiaContext` is the real one;
+/// tests substitute a `FixtureRunner`. `Repository` talks only to this.
+pub trait KopiaRunner: Send + Sync {
+    /// Run kopia with moss's config file and environment allowlist.
+    fn run_with(
+        &self,
+        password: Option<&Secret>,
+        args: &[OsString],
+        extra_env: &[(&str, &Secret)],
+        options: RunOptions,
+    ) -> Result<KopiaOutput>;
+
+    /// `run_with` without a timeout; `connect` selects the create/connect flags.
+    fn run(
+        &self,
+        password: Option<&Secret>,
+        args: &[OsString],
+        extra_env: &[(&str, &Secret)],
+        connect: bool,
+    ) -> Result<KopiaOutput> {
+        self.run_with(
+            password,
+            args,
+            extra_env,
+            RunOptions {
+                connect,
+                timeout: None,
+            },
+        )
+    }
+
+    /// Kopia's config file for this repository (`--config-file`).
+    fn config_file(&self) -> &Path;
+
+    /// The Kopia executable.
+    fn binary(&self) -> &Path;
+}
+
 /// Where Kopia's per-invocation state goes.
 #[derive(Debug, Clone)]
 pub struct KopiaContext {
@@ -78,9 +154,13 @@ pub struct KopiaContext {
     pub skip_version_check: bool,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Default)]
 pub struct KopiaOutput {
+    /// Exit code, `None` when the child was killed by a signal (or the output
+    /// is synthetic).
     pub status: Option<i32>,
+    /// The full exit status when a real child ran.
+    pub exit: Option<ExitStatus>,
     pub stdout: String,
     pub stderr: String,
 }
@@ -89,9 +169,27 @@ impl KopiaOutput {
     pub fn success(&self) -> bool {
         self.status == Some(0)
     }
+
+    /// Synthetic output (tests, fixtures): a code and captured streams.
+    pub fn synthetic(status: i32, stdout: impl Into<String>, stderr: impl Into<String>) -> Self {
+        KopiaOutput {
+            status: Some(status),
+            exit: None,
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+        }
+    }
+
+    /// The signal that terminated the child, if any.
+    #[cfg(unix)]
+    pub fn signal(&self) -> Option<i32> {
+        use std::os::unix::process::ExitStatusExt;
+        self.exit.and_then(|e| e.signal())
+    }
 }
 
-static VERSION: OnceLock<std::result::Result<KopiaVersion, String>> = OnceLock::new();
+/// Message and detail of a failed version probe, cached for the process.
+static VERSION: OnceLock<std::result::Result<KopiaVersion, (String, String)>> = OnceLock::new();
 
 /// Locate the Kopia binary. `MOSS_KOPIA` overrides PATH lookup.
 pub fn find_binary() -> Result<PathBuf> {
@@ -117,22 +215,33 @@ pub fn find_binary() -> Result<PathBuf> {
 /// Probe `kopia --version` once per process.
 pub fn version(binary: &Path) -> Result<KopiaVersion> {
     let cached = VERSION.get_or_init(|| {
-        let out = Command::new(binary)
-            .arg("--version")
+        let mut cmd = Command::new(binary);
+        cmd.arg("--version")
             .env_clear()
             .envs(base_env())
-            .stdin(Stdio::null())
-            .output()
-            .map_err(|e| format!("cannot run kopia: {e}"))?;
-        let text = String::from_utf8_lossy(&out.stdout);
-        KopiaVersion::parse(&text)
-            .ok_or_else(|| format!("unrecognised `kopia --version` output: {}", text.trim()))
+            .stdin(Stdio::null());
+        let out = run_command(cmd, Some(METADATA_TIMEOUT), "--version").map_err(|e| match e {
+            MossError::Kopia { message, detail } => (message, detail),
+            other => (
+                "Kopia was found but `kopia --version` failed.".to_string(),
+                other.to_string(),
+            ),
+        })?;
+        KopiaVersion::parse(&out.stdout).ok_or_else(|| {
+            (
+                "Kopia was found but `kopia --version` failed.".to_string(),
+                format!(
+                    "unrecognised `kopia --version` output: {}",
+                    out.stdout.trim()
+                ),
+            )
+        })
     });
     match cached {
         Ok(v) => Ok(v.clone()),
-        Err(e) => Err(MossError::Kopia {
-            message: "Kopia was found but `kopia --version` failed.".into(),
-            detail: e.clone(),
+        Err((message, detail)) => Err(MossError::Kopia {
+            message: message.clone(),
+            detail: detail.clone(),
         }),
     }
 }
@@ -217,7 +326,7 @@ impl KopiaContext {
 
     /// Build the command with moss's standard flags. `connect` adds the
     /// create/connect-only flags.
-    fn command(&self, args: &[&OsStr], connect: bool) -> Command {
+    fn command(&self, args: &[OsString], connect: bool) -> Command {
         let mut cmd = Command::new(&self.binary);
         cmd.env_clear();
         cmd.envs(base_env());
@@ -242,42 +351,21 @@ impl KopiaContext {
         cmd.stdin(Stdio::null());
         cmd
     }
+}
 
-    /// Run a repository command with the password in the child environment.
-    pub fn run(
-        &self,
-        password: &Secret,
-        args: &[&str],
-        extra_env: &[(&str, &Secret)],
-    ) -> Result<KopiaOutput> {
-        self.run_inner(Some(password), args, extra_env, false)
-    }
-
-    /// `repository create|connect` (adds cache-directory and update-check flags).
-    pub fn run_connect(
-        &self,
-        password: &Secret,
-        args: &[&str],
-        extra_env: &[(&str, &Secret)],
-    ) -> Result<KopiaOutput> {
-        self.run_inner(Some(password), args, extra_env, true)
-    }
-
-    /// Commands that need no repository password.
-    pub fn run_plain(&self, args: &[&str]) -> Result<KopiaOutput> {
-        self.run_inner(None, args, &[], false)
-    }
-
-    fn run_inner(
+impl KopiaRunner for KopiaContext {
+    fn run_with(
         &self,
         password: Option<&Secret>,
-        args: &[&str],
+        args: &[OsString],
         extra_env: &[(&str, &Secret)],
-        connect: bool,
+        options: RunOptions,
     ) -> Result<KopiaOutput> {
         check_version(&self.binary, self.skip_version_check)?;
-        let os_args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
-        let mut cmd = self.command(&os_args, connect);
+        if options.connect {
+            self.prepare_dirs()?;
+        }
+        let mut cmd = self.command(args, options.connect);
         if let Some(p) = password {
             cmd.env("KOPIA_PASSWORD", p.expose());
         }
@@ -285,32 +373,153 @@ impl KopiaContext {
             cmd.env(k, v.expose());
         }
         tracing::debug!(args = ?redact_args(args), "running kopia");
-        let out: Output = cmd.output().map_err(|e| MossError::Kopia {
-            message: "Failed to start Kopia.".into(),
-            detail: e.to_string(),
-        })?;
-        // The Command (and its copy of the password) drops here.
-        drop(cmd);
-        Ok(KopiaOutput {
-            status: out.status.code(),
-            stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+        // `run_command` consumes the Command, so its copy of the password is
+        // freed (not zeroised; see the module docs) when the child exits.
+        run_command(cmd, options.timeout, &verb(args))
+    }
+
+    fn config_file(&self) -> &Path {
+        &self.config_file
+    }
+
+    fn binary(&self) -> &Path {
+        &self.binary
+    }
+}
+
+/// The Kopia verb for messages: the first two non-flag arguments
+/// (`repository status`), or the first argument when there are none.
+fn verb(args: &[OsString]) -> String {
+    let words: Vec<String> = args
+        .iter()
+        .map(|a| a.to_string_lossy().into_owned())
+        .filter(|a| !a.starts_with('-'))
+        .take(2)
+        .collect();
+    if words.is_empty() {
+        args.first()
+            .map(|a| a.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    } else {
+        words.join(" ")
+    }
+}
+
+/// Spawn, drain both pipes on their own threads (stderr line by line into
+/// the `kopia` tracing target), and wait — polling when a timeout applies.
+fn run_command(mut cmd: Command, timeout: Option<Duration>, verb: &str) -> Result<KopiaOutput> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = cmd.spawn().map_err(|e| MossError::Kopia {
+        message: "Failed to start Kopia.".into(),
+        detail: e.to_string(),
+    })?;
+    drop(cmd);
+
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        if let Some(mut s) = stdout {
+            let _ = s.read_to_end(&mut buf);
+        }
+        buf
+    });
+    // Shared so a timeout can report what Kopia said so far without waiting
+    // for the reader: a grandchild holding the pipe would keep it alive.
+    let stderr_text = Arc::new(Mutex::new(String::new()));
+    let err_thread = {
+        let collected = Arc::clone(&stderr_text);
+        std::thread::spawn(move || {
+            if let Some(s) = stderr {
+                for line in BufReader::new(s).split(b'\n') {
+                    let Ok(line) = line else { break };
+                    let text = String::from_utf8_lossy(&line);
+                    let text = text.trim_end_matches('\r');
+                    tracing::debug!(target: "kopia", "{text}");
+                    let mut c = collected.lock().unwrap_or_else(|p| p.into_inner());
+                    c.push_str(text);
+                    c.push('\n');
+                }
+            }
         })
+    };
+
+    let exit = match wait_for(&mut child, timeout) {
+        Ok(status) => status,
+        Err(e) => {
+            // Kill and reap, but do not join the readers: they finish when the
+            // last holder of the pipes goes away, which may not be the child.
+            let _ = child.kill();
+            let _ = child.wait();
+            drop(out_thread);
+            drop(err_thread);
+            let stderr = stderr_text
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone();
+            return Err(match e {
+                WaitError::TimedOut => MossError::Kopia {
+                    message: format!(
+                        "Kopia did not respond within {} s: {verb}",
+                        timeout.unwrap_or_default().as_secs()
+                    ),
+                    detail: stderr.trim().to_string(),
+                },
+                WaitError::Io(io) => MossError::Kopia {
+                    message: format!("Failed while waiting for Kopia ({verb})."),
+                    detail: io.to_string(),
+                },
+            });
+        }
+    };
+    let stdout = out_thread.join().unwrap_or_default();
+    let _ = err_thread.join();
+    let stderr = std::mem::take(&mut *stderr_text.lock().unwrap_or_else(|p| p.into_inner()));
+    Ok(KopiaOutput {
+        status: exit.code(),
+        exit: Some(exit),
+        stdout: String::from_utf8_lossy(&stdout).into_owned(),
+        stderr,
+    })
+}
+
+enum WaitError {
+    TimedOut,
+    Io(std::io::Error),
+}
+
+fn wait_for(
+    child: &mut Child,
+    timeout: Option<Duration>,
+) -> std::result::Result<ExitStatus, WaitError> {
+    let Some(limit) = timeout else {
+        return child.wait().map_err(WaitError::Io);
+    };
+    let start = Instant::now();
+    loop {
+        if let Some(status) = child.try_wait().map_err(WaitError::Io)? {
+            return Ok(status);
+        }
+        if start.elapsed() >= limit {
+            return Err(WaitError::TimedOut);
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
 /// Arguments are never secret by construction (no --password, no keys), but
 /// keep the log line short.
-fn redact_args(args: &[&str]) -> Vec<String> {
+fn redact_args(args: &[OsString]) -> Vec<String> {
     args.iter()
         .map(|a| {
+            let a = a.to_string_lossy();
             if a.starts_with("--secret-access-key")
                 || a.starts_with("--access-key")
                 || a.starts_with("--session-token")
             {
                 "[redacted]".to_string()
             } else {
-                a.to_string()
+                a.into_owned()
             }
         })
         .collect()
@@ -398,6 +607,112 @@ pub fn classify_failure(out: &KopiaOutput, context: &str, op: KopiaOp) -> MossEr
     }
 }
 
+/// Test doubles for the runner. Compiled into unit tests only.
+#[cfg(test)]
+pub mod testing {
+    use std::ffi::OsString;
+    use std::path::{Path, PathBuf};
+    use std::sync::Mutex;
+
+    use super::{KopiaOutput, KopiaRunner, RunOptions};
+    use crate::error::Result;
+    use crate::security::secret::Secret;
+
+    /// Directory holding the captured Kopia 0.23.1 JSON.
+    pub fn fixture_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/kopia/0.23.1")
+    }
+
+    /// Read one fixture file.
+    pub fn fixture(name: &str) -> String {
+        let p = fixture_dir().join(name);
+        std::fs::read_to_string(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
+    }
+
+    /// A `KopiaRunner` that answers from canned output instead of spawning.
+    ///
+    /// Rules are tried in order; a rule matches when each of its tokens
+    /// appears, in order, somewhere in the argument vector (a subsequence,
+    /// so `["snapshot", "create", "moss-source:manifest"]` singles out the
+    /// manifest snapshot). Unmatched calls succeed with empty output, which
+    /// is what `policy set` and friends produce.
+    #[derive(Default)]
+    pub struct FixtureRunner {
+        rules: Vec<(Vec<String>, KopiaOutput)>,
+        calls: Mutex<Vec<Vec<String>>>,
+        config_file: PathBuf,
+        binary: PathBuf,
+    }
+
+    impl FixtureRunner {
+        pub fn new() -> FixtureRunner {
+            FixtureRunner {
+                config_file: PathBuf::from("/nonexistent/moss/kopia/fixture.config"),
+                binary: PathBuf::from("/nonexistent/bin/kopia"),
+                ..Default::default()
+            }
+        }
+
+        pub fn with_config_file(mut self, path: impl Into<PathBuf>) -> FixtureRunner {
+            self.config_file = path.into();
+            self
+        }
+
+        /// Answer calls matching `tokens` with `output`.
+        pub fn on(mut self, tokens: &[&str], output: KopiaOutput) -> FixtureRunner {
+            self.rules
+                .push((tokens.iter().map(|t| t.to_string()).collect(), output));
+            self
+        }
+
+        /// Answer calls matching `tokens` with the contents of a fixture file
+        /// on stdout and the given exit code.
+        pub fn on_fixture(self, tokens: &[&str], file: &str, status: i32) -> FixtureRunner {
+            self.on(tokens, KopiaOutput::synthetic(status, fixture(file), ""))
+        }
+
+        /// Every argument vector this runner has been asked to run.
+        pub fn calls(&self) -> Vec<Vec<String>> {
+            self.calls.lock().unwrap().clone()
+        }
+
+        fn matches(tokens: &[String], args: &[String]) -> bool {
+            let mut rest = args.iter();
+            tokens.iter().all(|t| rest.any(|a| a == t))
+        }
+    }
+
+    impl KopiaRunner for FixtureRunner {
+        fn run_with(
+            &self,
+            _password: Option<&Secret>,
+            args: &[OsString],
+            _extra_env: &[(&str, &Secret)],
+            _options: RunOptions,
+        ) -> Result<KopiaOutput> {
+            let args: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            self.calls.lock().unwrap().push(args.clone());
+            for (tokens, out) in &self.rules {
+                if Self::matches(tokens, &args) {
+                    return Ok(out.clone());
+                }
+            }
+            Ok(KopiaOutput::synthetic(0, "", ""))
+        }
+
+        fn config_file(&self) -> &Path {
+            &self.config_file
+        }
+
+        fn binary(&self) -> &Path {
+            &self.binary
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -417,11 +732,7 @@ mod tests {
 
     #[test]
     fn failure_classification() {
-        let out = |stderr: &str| KopiaOutput {
-            status: Some(1),
-            stdout: String::new(),
-            stderr: stderr.into(),
-        };
+        let out = |stderr: &str| KopiaOutput::synthetic(1, "", stderr);
         assert_eq!(
             classify_failure(
                 &out("failed to open repository: invalid repository password"),
@@ -464,5 +775,96 @@ mod tests {
         assert!(env.iter().any(|(k, _)| k == "KOPIA_CHECK_FOR_UPDATES"));
         assert!(!env.iter().any(|(k, _)| k == "KOPIA_PASSWORD"));
         assert!(!env.iter().any(|(k, _)| k == "AWS_SECRET_ACCESS_KEY"));
+    }
+
+    #[test]
+    fn verb_skips_flags() {
+        let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        assert_eq!(
+            verb(&args(&["repository", "status", "--json"])),
+            "repository status"
+        );
+        assert_eq!(verb(&args(&["--version"])), "--version");
+        assert_eq!(verb(&args(&[])), "");
+    }
+
+    /// The subprocess plumbing against a real shell: both streams are
+    /// captured, stderr survives, and the exit code comes back.
+    #[cfg(unix)]
+    #[test]
+    fn run_command_captures_both_streams() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo out; echo err >&2; exit 3"]);
+        let out = run_command(cmd, None, "sh").unwrap();
+        assert_eq!(out.status, Some(3));
+        assert_eq!(out.stdout, "out\n");
+        assert_eq!(out.stderr, "err\n");
+        assert!(out.exit.is_some());
+        assert_eq!(out.signal(), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_command_times_out_and_kills() {
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "echo started >&2; sleep 30"]);
+        let started = Instant::now();
+        let err = run_command(cmd, Some(Duration::from_secs(1)), "repository status").unwrap_err();
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "child was not killed"
+        );
+        match err {
+            MossError::Kopia { message, detail } => {
+                assert_eq!(
+                    message,
+                    "Kopia did not respond within 1 s: repository status"
+                );
+                assert_eq!(detail, "started");
+            }
+            other => panic!("unexpected error {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fixture_runner_matches_subsequences() {
+        let r = testing::FixtureRunner::new()
+            .on_fixture(
+                &["snapshot", "create", "moss-source:manifest"],
+                "snapshot-create-clean.json",
+                0,
+            )
+            .on_fixture(&["snapshot", "create"], "snapshot-create-fatal.json", 1);
+        let args = |v: &[&str]| v.iter().map(OsString::from).collect::<Vec<_>>();
+        let a = r
+            .run(
+                None,
+                &args(&["snapshot", "create", "--json", "/x"]),
+                &[],
+                false,
+            )
+            .unwrap();
+        assert_eq!(a.status, Some(1));
+        let b = r
+            .run(
+                None,
+                &args(&[
+                    "snapshot",
+                    "create",
+                    "--json",
+                    "--tags",
+                    "moss-source:manifest",
+                    "/m",
+                ]),
+                &[],
+                false,
+            )
+            .unwrap();
+        assert_eq!(b.status, Some(0));
+        let c = r
+            .run(None, &args(&["policy", "set", "/x"]), &[], false)
+            .unwrap();
+        assert!(c.success() && c.stdout.is_empty());
+        assert_eq!(r.calls().len(), 3);
     }
 }
