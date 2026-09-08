@@ -7,6 +7,52 @@ a major version, additions only.
 
 ## [Unreleased]
 
+### Changed (breaking)
+
+- **Repository ids changed.** The id that names the keychain entry and Kopia's config file is
+  now FNV-1a over the storage location; it was `DefaultHasher`, whose output Rust does not keep
+  stable across releases. Existing installs must run `moss init` once after upgrading; against
+  an existing repository that goes through the recovery-code bootstrap, so run
+  `moss recovery show` *before* upgrading or have the 24-word sheet to hand. The old keychain
+  entry and `<state>/kopia/<old id>.config` are left in place and are safe to delete.
+- `moss snapshots` status labels: a run whose snapshots report no error counts is
+  `unknown (no error counts reported)` rather than `partial (1 skipped)`; a snapshot Kopia marked
+  incomplete is reported as `incomplete`. `snapshots`, `status`, `verify` and `restore` now share
+  one run model and never disagree.
+
+### Fixed
+
+- Restore placed only sources with a hand-written destination mapping; `azure`, `talos`,
+  `terraform`, `claude`, `codex`, `npm_config`, every `shell_*` file, Linux `local_share`,
+  `local_state`, `mozilla`, `flatpak`, and macOS `preferences`, `containers`, `mail` were skipped
+  with "this platform has no location". One table (`profile/locations.rs`) now defines every
+  built-in source's location on each OS, and a test asserts each resolves and round-trips.
+- Restore set the destination root to mode 0700, including the home directory, and did so even
+  under `--dry-run`, which also wrote collision probe files. Restore now creates only a `--to`
+  directory (plain `mkdir -p`) and a dry run touches nothing.
+- Restore journal: a failed write was recorded as done, so `--resume` counted it as placed; a
+  file's bytes were not synced before its `done` record; damage in the middle of the journal
+  silently dropped later records (rollback could then delete completed files); non-UTF-8 paths
+  could alias. All four fixed; a damaged journal is now refused with exit 8.
+- Windows containment re-resolved path strings after validating them (a junction swapped in
+  between could escape the root). Every operation is now handle-relative (`NtCreateFile` with a
+  root handle, `NtSetInformationFile` for rename and delete); symlink creation is the one
+  documented exception and is re-verified through the parent handle.
+- Linux containment followed in-root symlinks at intermediate components (`RESOLVE_IN_ROOT`
+  re-roots rather than refuses); `RESOLVE_NO_SYMLINKS` is added. macOS used
+  `O_RESOLVE_BENEATH`, which also follows in-root links, and now uses the `O_NOFOLLOW`
+  component walk. Every Unix refuses a symlinked component.
+- A source directory that vanished during `snapshot create` was reported as "no repository is
+  initialised" (exit 3); Kopia failure classification now knows which verb ran.
+- Sensitivity rules for `~/.gem/credentials` and `~/.aws/sso/cache` compared a basename against a
+  path and could never match.
+- `init` with the password supplied in the environment never stored it in the configured
+  credential store; re-running `init` reset the repository's creation date.
+- Prompts are written to stderr and never fire under `--json`; the scan progress "skipped" counter
+  was never incremented; a stale-lock contender could block instead of exiting 10.
+- `--include`ing a path beneath an opt-in source (`~/Library/Application Support/k9s`) was silently
+  discarded by the nested-source dedup.
+
 ### Added
 
 The v1 command surface, on macOS, Linux and Windows, against Kopia 0.23.x.

@@ -12,7 +12,6 @@ keywords = ["backup", "kopia", "profile", "dotfiles", "cli"]
 categories = ["command-line-utilities"]
 
 [dependencies]
-anyhow = "1"
 bip39 = { version = "2", features = ["std", "zeroize"] }
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 directories = "6"
@@ -21,7 +20,6 @@ ignore = "0.4"
 indicatif = "0.18"
 keyring = "4"
 owo-colors = { version = "4", features = ["supports-colors"] }
-secrecy = "0.10"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml_ng = "0.10"
@@ -43,7 +41,6 @@ libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Threading", "Win32_Security", "Wdk_Foundation", "Wdk_Storage_FileSystem"] }
-winapi-util = "0.1"
 known-folders = "1"
 
 [dev-dependencies]
