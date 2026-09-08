@@ -1,0 +1,13 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&InitReport\n{\n    repository: Some(\"/tmp/repo\".into()), repository_id:\n    Some(\"71c0c64b14b241b7\".into()), identity: \"rhys\".into(), sources: 12,\n    recovery_acknowledged: true, config: PathBuf::from(\"/h/config.yaml\"),\n})"
+---
+{
+  "schema_version": 1,
+  "repository": "/tmp/repo",
+  "repository_id": "71c0c64b14b241b7",
+  "identity": "rhys",
+  "sources": 12,
+  "recovery_acknowledged": true,
+  "config": "/h/config.yaml"
+}

@@ -1,0 +1,10 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&YubikeyReport\n{ detected: 0, configured: false, available: false, })"
+---
+{
+  "schema_version": 1,
+  "detected": 0,
+  "configured": false,
+  "available": false
+}

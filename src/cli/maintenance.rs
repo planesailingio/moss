@@ -2,7 +2,7 @@
 
 use clap::Args;
 
-use crate::cli::AppContext;
+use crate::cli::{AppContext, reports};
 use crate::error::{ExitCode, MossError, Result};
 use crate::output::{confirm, human};
 use crate::restore::select::{self, RunSummary};
@@ -38,7 +38,7 @@ pub struct MaintenanceArgs {
 }
 
 pub fn status(ctx: &AppContext) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     let connected = ctx.connect()?;
     let repo = connected.repository();
     let st = repo.status()?;
@@ -53,67 +53,65 @@ pub fn status(ctx: &AppContext) -> Result<ExitCode> {
         hosts.entry(r.host.clone()).or_insert(r);
     }
     if console.json {
-        console.json_report(&serde_json::json!({
-            "repository": connected.repo.display_url(),
-            "repository_id": connected.repo.id,
-            "kopia_unique_id": st.unique_id_hex,
-            "credentials": match connected.credential_source {
+        console.json_report(&reports::StatusReport {
+            repository: connected.repo.display_url(),
+            repository_id: connected.repo.id.clone(),
+            kopia_unique_id: st.unique_id_hex.clone(),
+            credentials: match connected.credential_source {
                 crate::credentials::CredentialSource::Environment => "environment",
                 crate::credentials::CredentialSource::Keyring => "keyring",
             },
-            "maintenance_owner": maint.as_ref().map(|m| m.owner.clone()),
-            "next_full_maintenance": maint.as_ref().and_then(|m| m.schedule.next_full),
-            "runs": runs.len(),
-            "latest_by_host": hosts.values().map(|r| serde_json::json!({"host": r.host, "os": r.os, "user": r.user, "run": r.id, "started": r.started, "status": r.status})).collect::<Vec<_>>(),
-        }))?;
+            maintenance_owner: maint.as_ref().map(|m| m.owner.clone()),
+            next_full_maintenance: maint.as_ref().and_then(|m| m.schedule.next_full),
+            runs: runs.len(),
+            latest_by_host: hosts
+                .values()
+                .map(|r| reports::HostLatest::from_summary(r))
+                .collect(),
+        })?;
         return Ok(ExitCode::Success);
     }
-    println!("Repository");
-    println!(
-        "{}",
-        human::kv_block(&[
-            ("Location:".into(), connected.repo.display_url()),
-            (
-                "Credentials:".into(),
-                match connected.credential_source {
-                    crate::credentials::CredentialSource::Environment => "environment".into(),
-                    crate::credentials::CredentialSource::Keyring => connected.store_name.into(),
-                }
-            ),
-            (
-                "Kopia id:".into(),
-                st.unique_id_hex.chars().take(16).collect()
-            ),
-            ("Runs:".into(), runs.len().to_string()),
-        ])
-    );
+    console.result("Repository");
+    console.result(human::kv_block(&[
+        ("Location:".into(), connected.repo.display_url()),
+        (
+            "Credentials:".into(),
+            match connected.credential_source {
+                crate::credentials::CredentialSource::Environment => "environment".into(),
+                crate::credentials::CredentialSource::Keyring => connected.store_name.into(),
+            },
+        ),
+        (
+            "Kopia id:".into(),
+            st.unique_id_hex.chars().take(16).collect(),
+        ),
+        ("Runs:".into(), runs.len().to_string()),
+    ]));
     if let Some(m) = maint {
-        println!("\nMaintenance");
-        println!(
-            "{}",
-            human::kv_block(&[
-                (
-                    "Owner:".into(),
-                    format!(
-                        "{}  (only this identity runs maintenance automatically)",
-                        m.owner
-                    )
+        console.result("\nMaintenance");
+        console.result(human::kv_block(&[
+            (
+                "Owner:".into(),
+                format!(
+                    "{}  (only this identity runs maintenance automatically)",
+                    m.owner
                 ),
-                (
-                    "Next full:".into(),
-                    m.schedule
-                        .next_full
-                        .map(|t| t
-                            .with_timezone(&chrono::Local)
+            ),
+            (
+                "Next full:".into(),
+                m.schedule
+                    .next_full
+                    .map(|t| {
+                        t.with_timezone(&chrono::Local)
                             .format("%Y-%m-%d %H:%M")
-                            .to_string())
-                        .unwrap_or_else(|| "-".into())
-                ),
-            ])
-        );
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "-".into()),
+            ),
+        ]));
     }
-    println!("\nProfile: {}", connected.config.profile.identity);
-    println!("Hosts:");
+    console.result(format!("\nProfile: {}", connected.config.profile.identity));
+    console.result("Hosts:");
     let rows: Vec<Vec<String>> = hosts
         .values()
         .map(|r| {
@@ -129,17 +127,17 @@ pub fn status(ctx: &AppContext) -> Result<ExitCode> {
         })
         .collect();
     if rows.is_empty() {
-        println!("  (none yet)");
+        console.result("  (none yet)");
     } else {
         for row in rows {
-            println!("  {}", row.join("  "));
+            console.result(format!("  {}", row.join("  ")));
         }
     }
     Ok(ExitCode::Success)
 }
 
 pub fn verify(ctx: &AppContext, args: VerifyArgs) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     let connected = ctx.connect()?;
     let repo = connected.repository();
     let runs = select::list_runs(&repo)?;
@@ -161,16 +159,16 @@ pub fn verify(ctx: &AppContext, args: VerifyArgs) -> Result<ExitCode> {
         mode_problems = check_credential_modes(ctx.adapter().home());
     }
     if console.json {
-        console.json_report(&serde_json::json!({
-            "run": run.id,
-            "snapshots_verified": ids.len(),
-            "files_percent": args.files_percent,
-            "mode_problems": mode_problems,
-        }))?;
+        console.json_report(&reports::VerifyReport {
+            run: &run.id,
+            snapshots_verified: ids.len(),
+            files_percent: args.files_percent,
+            mode_problems: &mode_problems,
+        })?;
     } else {
-        println!("{} run {} verified.", console.ok_mark(), run.id);
+        console.result(format!("{} run {} verified.", console.ok_mark(), run.id));
         for p in &mode_problems {
-            println!("{} {p}", console.fail_mark());
+            console.result(format!("{} {p}", console.fail_mark()));
         }
     }
     if mode_problems.is_empty() {
@@ -232,13 +230,13 @@ pub fn check_credential_modes(home: &std::path::Path) -> Vec<String> {
 }
 
 pub fn prune(ctx: &AppContext, args: PruneArgs) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     let connected = ctx.connect()?;
     let repo = connected.repository();
     if args.delete
         && !args.yes
         && !confirm(
-            &console,
+            console,
             "Delete snapshots that fall outside the retention policy?",
             false,
         )?
@@ -247,20 +245,21 @@ pub fn prune(ctx: &AppContext, args: PruneArgs) -> Result<ExitCode> {
     }
     let out = repo.snapshot_expire(args.delete)?;
     if console.json {
-        console.json_report(
-            &serde_json::json!({ "deleted": args.delete, "kopia_output": out.stdout.trim() }),
-        )?;
+        console.json_report(&reports::PruneReport {
+            deleted: args.delete,
+            kopia_output: out.stdout.trim(),
+        })?;
     } else {
-        println!("{}", out.stdout.trim());
+        console.result(out.stdout.trim());
         if !args.delete {
-            println!("\n(report only; pass --delete to remove expired snapshots)");
+            console.result("\n(report only; pass --delete to remove expired snapshots)");
         }
     }
     Ok(ExitCode::Success)
 }
 
 pub fn run(ctx: &AppContext, args: MaintenanceArgs) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     let connected = ctx.connect()?;
     let repo = connected.repository();
     let info = repo.maintenance_info()?;
@@ -277,14 +276,18 @@ pub fn run(ctx: &AppContext, args: MaintenanceArgs) -> Result<ExitCode> {
     }
     let out = repo.maintenance_run(args.full)?;
     if console.json {
-        console.json_report(&serde_json::json!({ "full": args.full, "owner": info.owner, "kopia_output": out.stdout.trim() }))?;
+        console.json_report(&reports::MaintenanceReport {
+            full: args.full,
+            owner: &info.owner,
+            kopia_output: out.stdout.trim(),
+        })?;
     } else {
-        println!("{}", out.stdout.trim());
-        println!(
+        console.result(out.stdout.trim());
+        console.result(format!(
             "{} maintenance {} run finished.",
             console.ok_mark(),
             if args.full { "full" } else { "quick" }
-        );
+        ));
     }
     Ok(ExitCode::Success)
 }

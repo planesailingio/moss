@@ -30,6 +30,17 @@ pub struct RunOutcome {
     pub unexpected_errors: u64,
 }
 
+impl RunOutcome {
+    /// Spec §18, §23: 9 when anything was skipped so schedulers notice.
+    pub fn exit_code(&self) -> crate::error::ExitCode {
+        if self.complete {
+            crate::error::ExitCode::Success
+        } else {
+            crate::error::ExitCode::PartialSuccess
+        }
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct SnapshotOutcome {
     pub source: String,

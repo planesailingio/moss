@@ -1,0 +1,9 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&PruneReport\n{ deleted: false, kopia_output: \"nothing to expire\", })"
+---
+{
+  "schema_version": 1,
+  "deleted": false,
+  "kopia_output": "nothing to expire"
+}

@@ -1,0 +1,13 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&VerifyReport\n{\n    run: \"01RUN\", snapshots_verified: 3, files_percent: 10, mode_problems:\n    &[\"~/.ssh/id_ed25519 is mode 0644\".to_string()],\n})"
+---
+{
+  "schema_version": 1,
+  "run": "01RUN",
+  "snapshots_verified": 3,
+  "files_percent": 10,
+  "mode_problems": [
+    "~/.ssh/id_ed25519 is mode 0644"
+  ]
+}

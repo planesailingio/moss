@@ -5,7 +5,7 @@
 
 use clap::Args;
 
-use crate::cli::AppContext;
+use crate::cli::{AppContext, reports};
 use crate::error::{ExitCode, Result};
 use crate::output::human;
 use crate::restore::select::{RunSummary, list_runs};
@@ -21,7 +21,7 @@ pub struct SnapshotsArgs {
 }
 
 pub fn run(ctx: &AppContext, args: SnapshotsArgs) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     let connected = ctx.connect()?;
     let repo = connected.repository();
     let mut runs = list_runs(&repo)?;
@@ -33,11 +33,11 @@ pub fn run(ctx: &AppContext, args: SnapshotsArgs) -> Result<ExitCode> {
     }
     let summaries: Vec<RunSummary> = runs.iter().map(|r| r.summary()).collect();
     if console.json {
-        console.json_report(&serde_json::json!({ "runs": summaries }))?;
+        console.json_report(&reports::RunsReport { runs: summaries })?;
         return Ok(ExitCode::Success);
     }
     if runs.is_empty() {
-        println!("No snapshots yet. Run `moss backup`.");
+        console.result("No snapshots yet. Run `moss backup`.");
         return Ok(ExitCode::Success);
     }
     let rows: Vec<Vec<String>> = runs
@@ -54,9 +54,9 @@ pub fn run(ctx: &AppContext, args: SnapshotsArgs) -> Result<ExitCode> {
             ]
         })
         .collect();
-    println!(
-        "{}",
-        human::table(&["ID", "DATE", "HOST", "OS", "SIZE", "STATUS"], &rows)
-    );
+    console.result(human::table(
+        &["ID", "DATE", "HOST", "OS", "SIZE", "STATUS"],
+        &rows,
+    ));
     Ok(ExitCode::Success)
 }

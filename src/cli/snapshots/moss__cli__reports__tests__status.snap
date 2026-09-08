@@ -1,0 +1,24 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&StatusReport\n{\n    repository: \"/tmp/repo\".into(), repository_id: \"71c0c64b14b241b7\".into(),\n    kopia_unique_id: \"abcdef\".into(), credentials: \"keyring\",\n    maintenance_owner: Some(\"rhys@mac\".into()), next_full_maintenance: None,\n    runs: 1, latest_by_host: vec![HostLatest::from_summary(&summary())],\n})"
+---
+{
+  "schema_version": 1,
+  "repository": "/tmp/repo",
+  "repository_id": "71c0c64b14b241b7",
+  "kopia_unique_id": "abcdef",
+  "credentials": "keyring",
+  "maintenance_owner": "rhys@mac",
+  "next_full_maintenance": null,
+  "runs": 1,
+  "latest_by_host": [
+    {
+      "host": "mac",
+      "os": "macos",
+      "user": "rhys",
+      "run": "01RUN",
+      "started": "2026-09-04T10:00:00Z",
+      "status": "complete"
+    }
+  ]
+}

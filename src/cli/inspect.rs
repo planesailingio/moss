@@ -71,7 +71,7 @@ struct Estimate {
 }
 
 pub fn run(ctx: &AppContext, args: InspectArgs) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     let config = ctx.load_config_or_default()?;
     let adapter = ctx.adapter();
     let host = crate::platform::host_info(adapter);
@@ -158,7 +158,7 @@ pub fn run(ctx: &AppContext, args: InspectArgs) -> Result<ExitCode> {
     }
 
     print_human(
-        &console,
+        console,
         &host,
         &config.profile.identity,
         &result,
@@ -351,7 +351,7 @@ fn print_human(
             (false, None) => "new".to_string(),
         }
     ));
-    println!("{out}");
+    console.result(out);
 }
 
 pub fn describe_collision(c: &crate::backup::manifest::Collision) -> String {

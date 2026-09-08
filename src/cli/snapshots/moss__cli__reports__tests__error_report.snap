@@ -1,0 +1,10 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&ErrorReport\n{ error: \"boom\".into(), exit_code: 1, exit_code_name: \"general failure\", })"
+---
+{
+  "schema_version": 1,
+  "error": "boom",
+  "exit_code": 1,
+  "exit_code_name": "general failure"
+}

@@ -63,8 +63,8 @@ impl Resolver {
     /// A resolver that prompts on the console. `Interactive` without a usable
     /// terminal fails with exit 13 at the first conflict.
     pub fn new(policy: ConflictPolicy, console: &Console) -> Resolver {
-        let console = *console;
-        let prompt_console = console;
+        let console = console.clone();
+        let prompt_console = console.clone();
         Resolver {
             policy,
             bulk: None,

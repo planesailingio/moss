@@ -5,8 +5,8 @@ use clap::{Args, Subcommand};
 
 use crate::backup::kopia::{self, KopiaRunner};
 use crate::backup::repository::{Repository, S3Credentials};
-use crate::cli::AppContext;
 use crate::cli::context::{parse_repository_url, repository_id};
+use crate::cli::{AppContext, reports};
 use crate::config::{Config, CredentialStoreKind, RepositoryType};
 use crate::credentials::{self, ENV_PASSWORD};
 use crate::error::{ExitCode, MossError, Result};
@@ -62,10 +62,12 @@ pub enum InitSubcommand {
 pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
     if let Some(InitSubcommand::ListBackupEndpoints { name }) = args.command {
         if ctx.console.json {
-            ctx.console
-                .json_report(&serde_json::json!({ "endpoints": crate::endpoints::ENDPOINTS }))?;
+            ctx.console.json_report(&reports::EndpointsReport {
+                endpoints: crate::endpoints::ENDPOINTS,
+            })?;
         } else {
-            println!("{}", crate::endpoints::render_table(name.as_deref()));
+            ctx.console
+                .result(crate::endpoints::render_table(name.as_deref()));
         }
         return Ok(ExitCode::Success);
     }
@@ -73,7 +75,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
         .repository
         .clone()
         .ok_or_else(|| MossError::Usage("--repository is required".into()))?;
-    let console = ctx.console;
+    let console = &ctx.console;
     let adapter = ctx.adapter();
     let host = crate::platform::host_info(adapter);
     let mut config = ctx.load_config_or_default()?;
@@ -117,7 +119,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
     {
         Some(i) => i,
         None if console.can_prompt() => {
-            let answer = prompt_line(&console, &format!("Profile identity [{}]:", host.username))?;
+            let answer = prompt_line(console, &format!("Profile identity [{}]:", host.username))?;
             if answer.is_empty() {
                 host.username.clone()
             } else {
@@ -232,9 +234,9 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
     );
     if repo.recovery_acknowledged_at.is_some() && !args.print {
         console.line("Recovery sheet already acknowledged for this repository. Run `moss recovery show` to see it again.");
-        return finish(ctx, &config, &console);
+        return finish(ctx, &config, console);
     }
-    println!("{sheet}");
+    console.result(sheet);
     if args.print {
         return Ok(ExitCode::Success);
     }
@@ -242,7 +244,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
         true
     } else if console.can_prompt() {
         confirm(
-            &console,
+            console,
             "\n  [ ] I have stored this somewhere safe   (required to continue)\n\nType y to confirm:",
             false,
         )?
@@ -259,19 +261,22 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
         r.recovery_acknowledged_at = Some(chrono::Utc::now());
     }
     ctx.save_config(&config)?;
-    finish(ctx, &config, &console)
+    finish(ctx, &config, console)
 }
 
 fn finish(ctx: &AppContext, config: &Config, console: &crate::output::Console) -> Result<ExitCode> {
     if console.json {
-        console.json_report(&serde_json::json!({
-            "repository": config.repository.as_ref().map(|r| r.display_url()),
-            "repository_id": config.repository.as_ref().map(|r| r.id.clone()),
-            "identity": config.profile.identity,
-            "sources": config.sources.len(),
-            "recovery_acknowledged": config.repository.as_ref().and_then(|r| r.recovery_acknowledged_at.is_some().then_some(true)).unwrap_or(false),
-            "config": ctx.config_path,
-        }))?;
+        console.json_report(&reports::InitReport {
+            repository: config.repository.as_ref().map(|r| r.display_url()),
+            repository_id: config.repository.as_ref().map(|r| r.id.clone()),
+            identity: config.profile.identity.clone(),
+            sources: config.sources.len(),
+            recovery_acknowledged: config
+                .repository
+                .as_ref()
+                .is_some_and(|r| r.recovery_acknowledged_at.is_some()),
+            config: ctx.config_path.clone(),
+        })?;
     } else {
         console.line("\nNext:\n  moss doctor\n  moss inspect\n  moss backup");
     }
@@ -286,7 +291,7 @@ fn bootstrap(
     s3: Option<&S3Credentials>,
     store: &dyn credentials::CredentialStore,
 ) -> Result<(Secret, bool)> {
-    let console = ctx.console;
+    let console = &ctx.console;
     if !console.can_prompt() {
         return Err(MossError::InteractionRequired(format!(
             "The repository at {} already exists and needs its recovery code. Re-run interactively, or set {ENV_PASSWORD} to the 24-word recovery code.",
@@ -294,11 +299,11 @@ fn bootstrap(
         )));
     }
     for attempt in 1..=3 {
-        let input = prompt_line(&console, "Enter the 24-word recovery code from your sheet:")?;
+        let input = prompt_line(console, "Enter the 24-word recovery code from your sheet:")?;
         let pw = match recovery::parse(&input) {
             Ok(pw) => pw,
             Err(e) => {
-                console.warn(format!("{e}"));
+                console.warn(e.to_string());
                 continue;
             }
         };

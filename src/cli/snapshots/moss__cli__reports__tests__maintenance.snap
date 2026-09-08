@@ -1,0 +1,10 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&MaintenanceReport\n{ full: true, owner: \"rhys@mac\", kopia_output: \"ok\", })"
+---
+{
+  "schema_version": 1,
+  "full": true,
+  "owner": "rhys@mac",
+  "kopia_output": "ok"
+}

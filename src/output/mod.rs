@@ -1,8 +1,11 @@
 //! Human and JSON output (spec §26, §32).
 //!
 //! TTY detection, `NO_COLOR`, `--quiet` and `--json` are decided once here.
+//! The console owns its two writers, so every command renders through it and
+//! tests can capture exactly what a user would see.
 
 use std::io::{IsTerminal, Write};
+use std::sync::{Arc, Mutex};
 
 use owo_colors::{OwoColorize, Stream};
 use serde::Serialize;
@@ -12,7 +15,9 @@ pub mod human;
 /// JSON schema version carried by every machine-readable report (spec §26).
 pub const JSON_SCHEMA_VERSION: u32 = 1;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+type Writer = Arc<Mutex<Box<dyn Write + Send>>>;
+
+#[derive(Clone)]
 pub struct Console {
     pub json: bool,
     pub quiet: bool,
@@ -21,6 +26,39 @@ pub struct Console {
     pub stdout_tty: bool,
     pub stderr_tty: bool,
     pub color: bool,
+    out: Writer,
+    err: Writer,
+}
+
+impl std::fmt::Debug for Console {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Console")
+            .field("json", &self.json)
+            .field("quiet", &self.quiet)
+            .field("verbose", &self.verbose)
+            .field("non_interactive", &self.non_interactive)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A `Write` over a shared buffer, for capturing output in tests.
+#[derive(Clone, Default)]
+pub struct Captured(Arc<Mutex<Vec<u8>>>);
+
+impl Captured {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl Write for Captured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Console {
@@ -36,11 +74,21 @@ impl Console {
             stdout_tty,
             stderr_tty,
             color: stdout_tty && !no_color && !json,
+            out: Arc::new(Mutex::new(Box::new(std::io::stdout()))),
+            err: Arc::new(Mutex::new(Box::new(std::io::stderr()))),
         }
     }
 
+    /// A non-interactive console whose output goes nowhere.
     pub fn for_tests() -> Console {
-        Console {
+        Console::capturing().0
+    }
+
+    /// A non-interactive console whose stdout and stderr are captured.
+    pub fn capturing() -> (Console, Captured, Captured) {
+        let out = Captured::default();
+        let err = Captured::default();
+        let console = Console {
             json: false,
             quiet: false,
             verbose: 0,
@@ -48,7 +96,10 @@ impl Console {
             stdout_tty: false,
             stderr_tty: false,
             color: false,
-        }
+            out: Arc::new(Mutex::new(Box::new(out.clone()))),
+            err: Arc::new(Mutex::new(Box::new(err.clone()))),
+        };
+        (console, out, err)
     }
 
     /// Prompts are possible only on an interactive terminal, and never in
@@ -57,13 +108,49 @@ impl Console {
         !self.non_interactive && !self.json && self.stdout_tty && std::io::stdin().is_terminal()
     }
 
-    /// Print a human line (suppressed by --json and --quiet).
+    fn write_out(&self, text: &str, newline: bool) {
+        let mut out = self.out.lock().unwrap();
+        let _ = out.write_all(text.as_bytes());
+        if newline {
+            let _ = out.write_all(b"\n");
+        }
+        let _ = out.flush();
+    }
+
+    fn write_err(&self, text: &str, newline: bool) {
+        let mut err = self.err.lock().unwrap();
+        let _ = err.write_all(text.as_bytes());
+        if newline {
+            let _ = err.write_all(b"\n");
+        }
+        let _ = err.flush();
+    }
+
+    /// Print an informational line (suppressed by --json and --quiet).
     pub fn line(&self, text: impl AsRef<str>) {
         if self.json || self.quiet {
             return;
         }
-        let mut out = std::io::stdout().lock();
-        let _ = writeln!(out, "{}", text.as_ref());
+        self.write_out(text.as_ref(), true);
+    }
+
+    /// Print a command's result (suppressed by --json only: `--quiet` hides
+    /// chatter, not the answer).
+    pub fn result(&self, text: impl AsRef<str>) {
+        if self.json {
+            return;
+        }
+        self.write_out(text.as_ref(), true);
+    }
+
+    /// Write verbatim to stdout, regardless of flags (pass-through output).
+    pub fn raw(&self, text: impl AsRef<str>) {
+        self.write_out(text.as_ref(), false);
+    }
+
+    /// Write verbatim to stderr, regardless of flags.
+    pub fn raw_err(&self, text: impl AsRef<str>) {
+        self.write_err(text.as_ref(), false);
     }
 
     /// Print regardless of --quiet (but not under --json): warnings.
@@ -71,38 +158,31 @@ impl Console {
         if self.json {
             return;
         }
-        let mut err = std::io::stderr().lock();
         let text = text.as_ref();
         if self.color && self.stderr_tty {
-            let _ = writeln!(
-                err,
-                "{}",
-                text.if_supports_color(Stream::Stderr, |t| t.yellow())
+            self.write_err(
+                &text
+                    .if_supports_color(Stream::Stderr, |t| t.yellow())
+                    .to_string(),
+                true,
             );
         } else {
-            let _ = writeln!(err, "{text}");
+            self.write_err(text, true);
         }
     }
 
     /// Print an error message (always, even under --json it goes to stderr).
     pub fn error(&self, text: impl AsRef<str>) {
-        let mut err = std::io::stderr().lock();
-        let _ = writeln!(err, "{}", text.as_ref());
-    }
-
-    pub fn debug(&self, text: impl AsRef<str>) {
-        if self.verbose > 0 && !self.json {
-            let mut err = std::io::stderr().lock();
-            let _ = writeln!(err, "{}", text.as_ref());
-        }
+        self.write_err(text.as_ref(), true);
     }
 
     /// Emit a JSON report with `schema_version`.
     pub fn json_report<T: Serialize>(&self, report: &T) -> std::io::Result<()> {
         let value = with_schema(report);
-        let mut out = std::io::stdout().lock();
-        serde_json::to_writer_pretty(&mut out, &value)?;
-        writeln!(out)
+        let mut text = serde_json::to_string_pretty(&value)?;
+        text.push('\n');
+        self.write_out(&text, false);
+        Ok(())
     }
 
     pub fn ok_mark(&self) -> &'static str {
@@ -160,10 +240,7 @@ pub fn confirm(console: &Console, question: &str, default_yes: bool) -> crate::e
     }
     let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
     // Prompts go to stderr so stdout stays a clean report stream.
-    let mut out = std::io::stderr().lock();
-    let _ = write!(out, "{question} {suffix} ");
-    let _ = out.flush();
-    drop(out);
+    console.raw_err(format!("{question} {suffix} "));
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     let answer = line.trim().to_ascii_lowercase();
@@ -181,10 +258,7 @@ pub fn prompt_line(console: &Console, question: &str) -> crate::error::Result<St
             "Input is required: {question}"
         )));
     }
-    let mut out = std::io::stderr().lock();
-    let _ = write!(out, "{question} ");
-    let _ = out.flush();
-    drop(out);
+    console.raw_err(format!("{question} "));
     let mut line = String::new();
     std::io::stdin().read_line(&mut line)?;
     Ok(line.trim().to_string())
@@ -204,6 +278,28 @@ mod tests {
         let text = serde_json::to_string(&v).unwrap();
         assert!(text.starts_with("{\"schema_version\":1"));
         assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn quiet_hides_chatter_but_not_results_and_json_hides_both() {
+        let (mut c, out, err) = Console::capturing();
+        c.quiet = true;
+        c.line("chatter");
+        c.result("answer");
+        c.warn("careful");
+        assert_eq!(out.text(), "answer\n");
+        assert_eq!(err.text(), "careful\n");
+        let (mut c, out, _) = Console::capturing();
+        c.json = true;
+        c.line("chatter");
+        c.result("answer");
+        c.json_report(&serde_json::json!({ "a": 1 })).unwrap();
+        assert!(
+            out.text().starts_with("{\n  \"schema_version\": 1"),
+            "{}",
+            out.text()
+        );
+        assert!(!out.text().contains("answer"));
     }
 
     #[test]

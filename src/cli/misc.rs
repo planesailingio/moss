@@ -2,7 +2,7 @@
 
 use clap::{Args, Subcommand};
 
-use crate::cli::AppContext;
+use crate::cli::{AppContext, reports};
 use crate::config::PathRule;
 use crate::error::{ExitCode, MossError, Result};
 use crate::model::{ProfileCategory, expand_tilde};
@@ -86,14 +86,14 @@ pub fn parse_category(s: &str) -> std::result::Result<ProfileCategory, String> {
 pub fn config(ctx: &AppContext, args: ConfigArgs) -> Result<ExitCode> {
     match args.command.unwrap_or(ConfigSubcommand::Show) {
         ConfigSubcommand::Path => {
-            println!("{}", ctx.config_path.display());
+            ctx.console.result(ctx.config_path.display().to_string());
         }
         ConfigSubcommand::Show => {
             let cfg = ctx.load_config_or_default()?;
             if ctx.console.json {
                 ctx.console.json_report(&cfg)?;
             } else {
-                print!("{}", crate::config::render(&cfg)?);
+                ctx.console.raw(crate::config::render(&cfg)?);
             }
         }
     }
@@ -175,7 +175,7 @@ pub fn recovery(ctx: &AppContext, args: RecoveryArgs) -> Result<ExitCode> {
     if ctx.console.json {
         return Err(MossError::Usage("The recovery sheet is never emitted as JSON; run without --json and redirect the output.".into()));
     }
-    println!("{sheet}");
+    ctx.console.result(sheet);
     Ok(ExitCode::Success)
 }
 
@@ -185,11 +185,13 @@ pub fn yubikey(ctx: &AppContext, args: YubikeyArgs) -> Result<ExitCode> {
         YubikeySubcommand::Detect | YubikeySubcommand::Status => {
             let keys = provider.detect()?;
             if ctx.console.json {
-                ctx.console.json_report(&serde_json::json!({ "detected": keys.len(), "configured": false, "available": false }))?;
+                ctx.console.json_report(&reports::YubikeyReport {
+                    detected: keys.len(),
+                    configured: false,
+                    available: false,
+                })?;
             } else if keys.is_empty() {
-                println!(
-                    "No YubiKey detected.\n\nYubiKey-protected repositories are not available in this version (Phase 2). The recovery code protects the repository."
-                );
+                ctx.console.result("No YubiKey detected.\n\nYubiKey-protected repositories are not available in this version (Phase 2). The recovery code protects the repository.");
             }
             Ok(ExitCode::Success)
         }
@@ -209,8 +211,8 @@ pub fn kopia(ctx: &AppContext, args: KopiaArgs) -> Result<ExitCode> {
     }
     let connected = ctx.connect()?;
     let out = connected.repository().passthrough(&args.args)?;
-    print!("{}", out.stdout);
-    eprint!("{}", out.stderr);
+    ctx.console.raw(&out.stdout);
+    ctx.console.raw_err(&out.stderr);
     Ok(if out.success() {
         ExitCode::Success
     } else {

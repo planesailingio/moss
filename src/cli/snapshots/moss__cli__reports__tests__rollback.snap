@@ -1,0 +1,13 @@
+---
+source: src/cli/reports.rs
+expression: "with_schema(&RollbackReport\n{\n    rolled_back: true, removed: vec![\"/h/.ssh/half\".into()], restored_backups:\n    vec![], failed: vec![],\n})"
+---
+{
+  "schema_version": 1,
+  "rolled_back": true,
+  "removed": [
+    "/h/.ssh/half"
+  ],
+  "restored_backups": [],
+  "failed": []
+}

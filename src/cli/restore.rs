@@ -6,7 +6,7 @@ use std::path::PathBuf;
 
 use clap::Args;
 
-use crate::cli::AppContext;
+use crate::cli::{AppContext, reports};
 use crate::config::ConflictPolicy;
 use crate::error::{ExitCode, MossError, Result};
 use crate::lock::Lock;
@@ -50,7 +50,7 @@ pub struct RestoreArgs {
 }
 
 pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
-    let console = ctx.console;
+    let console = &ctx.console;
     if args.resume && args.rollback {
         return Err(MossError::Usage(
             "--resume and --rollback are mutually exclusive".into(),
@@ -68,18 +68,18 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
         &journal_path,
         args.resume,
         args.rollback,
-        &console,
+        console,
     )? {
         Recovery::Clean => None,
         Recovery::Aborted => return Ok(ExitCode::General),
         Recovery::RolledBack { run_id, summary } => {
             if console.json {
-                console.json_report(&serde_json::json!({
-                    "rolled_back": true,
-                    "removed": summary.removed,
-                    "restored_backups": summary.restored_backups,
-                    "failed": summary.failed,
-                }))?;
+                console.json_report(&reports::RollbackReport {
+                    rolled_back: true,
+                    removed: summary.removed.clone(),
+                    restored_backups: summary.restored_backups.clone(),
+                    failed: summary.failed.clone(),
+                })?;
             } else {
                 console.line(format!(
                     "Rolled back the interrupted restore of {run_id}: {} file(s) removed, {} backup(s) restored{}.",
@@ -119,7 +119,7 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
     };
     validate_manifest(&manifest, run)?;
     let sources = select_sources(&manifest, &args.category, &args.source)?;
-    let policy = crate::cli::conflict_policy(args.conflict, &connected.config, &console);
+    let policy = crate::cli::conflict_policy(args.conflict, &connected.config, console);
     let root_override = args.to.as_ref().map(|t| {
         if t.is_absolute() {
             t.clone()
@@ -132,7 +132,7 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
 
     console.line(format!(
         "{} snapshot {} from {} ({}) made {} — {} source(s) onto {}",
-        if ctx.global.dry_run {
+        if ctx.options.dry_run {
             "Planning"
         } else {
             "Restoring"
@@ -154,19 +154,19 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
             rename_collisions: args.rename_collisions,
             keep_owners: args.keep_owners,
             root_override,
-            dry_run: ctx.global.dry_run,
+            dry_run: ctx.options.dry_run,
             resume: resume_state,
             journal_path: &journal_path,
         },
         stager,
         adapter,
-        &console,
+        console,
     )?;
 
     if console.json {
         console.json_report(&report)?;
     } else {
-        console.line(report.render_human(&console));
+        console.line(report.render_human(console));
     }
     Ok(report.exit_code())
 }

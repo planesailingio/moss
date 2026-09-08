@@ -64,9 +64,6 @@ pub struct AppContext {
     pub paths: MossPaths,
     pub config_path: PathBuf,
     pub options: Options,
-    /// TODO: remove once `cli/backup.rs` and `cli/restore.rs` read
-    /// `options.dry_run` / `options.non_interactive` instead of `global`.
-    pub global: GlobalArgs,
     pub store_factory: StoreFactory,
     pub kopia_factory: KopiaFactory,
     adapter: Box<dyn PlatformAdapter>,
@@ -101,7 +98,6 @@ impl AppContext {
             paths,
             config_path,
             options: Options::from(&global),
-            global,
             store_factory: credentials::store_for,
             kopia_factory: default_kopia_factory,
             adapter: platform::current_adapter(),

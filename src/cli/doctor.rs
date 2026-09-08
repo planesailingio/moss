@@ -11,7 +11,7 @@ pub fn run(ctx: &AppContext) -> Result<ExitCode> {
     if ctx.console.json {
         ctx.console.json_report(&report)?;
     } else {
-        print!("{}", render(&report, &ctx.console));
+        ctx.console.raw(render(&report, &ctx.console));
     }
     Ok(report.exit_code())
 }

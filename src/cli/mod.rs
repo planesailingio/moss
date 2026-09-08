@@ -15,6 +15,7 @@ pub mod init;
 pub mod inspect;
 pub mod maintenance;
 pub mod misc;
+pub mod reports;
 pub mod restore;
 pub mod snapshots;
 
@@ -129,7 +130,7 @@ pub fn main() -> i32 {
         cli.global.non_interactive,
     );
     init_tracing(cli.global.verbose);
-    match run(cli, console) {
+    match run(cli, console.clone()) {
         Ok(code) => code.code(),
         Err(err) => {
             report_error(&console, &err);
@@ -159,13 +160,11 @@ fn init_tracing(verbose: u8) {
 
 pub fn report_error(console: &Console, err: &MossError) {
     if console.json {
-        let value = serde_json::json!({
-            "schema_version": crate::output::JSON_SCHEMA_VERSION,
-            "error": err.to_string(),
-            "exit_code": err.exit_code().code(),
-            "exit_code_name": err.exit_code().description(),
+        let _ = console.json_report(&reports::ErrorReport {
+            error: err.to_string(),
+            exit_code: err.exit_code().code(),
+            exit_code_name: err.exit_code().description(),
         });
-        let _ = crate::output::Console::json_report(console, &value);
     }
     console.error(format!("error: {err}"));
     if console.verbose > 0

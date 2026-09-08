@@ -139,13 +139,7 @@ pub enum MossError {
     SensitiveRefusal(String),
 
     #[error("{0}")]
-    RestoreConflict(String),
-
-    #[error("{0}")]
     Integrity(String),
-
-    #[error("{0}")]
-    Partial(String),
 
     #[error("{0}")]
     YubiKey(String),
@@ -212,9 +206,7 @@ impl MossError {
             MossError::AlreadyRunning { .. } => ExitCode::AlreadyRunning,
             MossError::InteractionRequired(_) => ExitCode::InteractionRequired,
             MossError::SensitiveRefusal(_) => ExitCode::SensitiveRefusal,
-            MossError::RestoreConflict(_) => ExitCode::RestoreConflict,
             MossError::Integrity(_) => ExitCode::Integrity,
-            MossError::Partial(_) => ExitCode::PartialSuccess,
             MossError::YubiKey(_) => ExitCode::YubiKeyUnavailable,
             MossError::Kopia { .. } | MossError::Other(_) | MossError::Io { .. } => {
                 ExitCode::General
@@ -296,7 +288,6 @@ mod tests {
                 .code(),
             13
         );
-        assert_eq!(MossError::Partial(String::new()).exit_code().code(), 9);
     }
 
     #[test]
