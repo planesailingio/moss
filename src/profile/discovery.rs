@@ -108,6 +108,28 @@ const KNOWN: &[Known] = &[
         only: None,
         action: Inclusion::Include,
     },
+    // k9s keeps config, skins, plugins and hotkeys here. Same id on every
+    // platform; the path differs. `~/.config/k9s` is nested under the
+    // `config` source, so it only surfaces on its own when `~/.config` is not
+    // itself selected; restore still maps `k9s` onto it (spec §15).
+    Known {
+        id: "k9s",
+        path: "Library/Application Support/k9s",
+        category: ProfileCategory::Development,
+        portable: Portability::PortableWithPathTranslation,
+        reason: "k9s configuration, skins and plugins",
+        only: Some(Platform::MacOs),
+        action: Inclusion::Include,
+    },
+    Known {
+        id: "k9s",
+        path: ".config/k9s",
+        category: ProfileCategory::Development,
+        portable: Portability::PortableWithPathTranslation,
+        reason: "k9s configuration, skins and plugins",
+        only: None,
+        action: Inclusion::Include,
+    },
     Known {
         id: "config",
         path: ".config",
@@ -248,9 +270,9 @@ const KNOWN: &[Known] = &[
         path: "Library/Application Support",
         category: ProfileCategory::ApplicationState,
         portable: Portability::PlatformSpecific,
-        reason: "macOS application support data",
+        reason: "macOS application support data (large, mostly app-managed state; opt-in)",
         only: Some(Platform::MacOs),
-        action: Inclusion::Include,
+        action: Inclusion::OptIn,
     },
     Known {
         id: "preferences",
@@ -308,11 +330,19 @@ const KNOWN: &[Known] = &[
     },
 ];
 
+/// Standard user directories that are opt-in rather than included by default.
+/// `~/Downloads` is a landing zone for installers and transient files; the
+/// user says `moss include ~/Downloads` to back it up.
+const OPT_IN_USER_DIRS: &[&str] = &["downloads"];
+
 fn user_dir_category(id: &str) -> (ProfileCategory, &'static str) {
     match id {
         "documents" => (ProfileCategory::PersonalData, "Standard documents folder"),
         "desktop" => (ProfileCategory::PersonalData, "Desktop"),
-        "downloads" => (ProfileCategory::PersonalData, "Downloads"),
+        "downloads" => (
+            ProfileCategory::PersonalData,
+            "Downloads (transient by default; opt-in)",
+        ),
         "pictures" => (ProfileCategory::PersonalData, "Pictures"),
         "video" => (
             ProfileCategory::PersonalData,
@@ -332,13 +362,18 @@ pub fn discover(adapter: &dyn PlatformAdapter, config: &Config) -> Vec<ProfileSo
 
     for known in adapter.known_dirs() {
         let (category, reason) = user_dir_category(known.id.as_str());
+        let default_action = if OPT_IN_USER_DIRS.contains(&known.id.as_str()) {
+            Inclusion::OptIn
+        } else {
+            Inclusion::Include
+        };
         out.push(ProfileSource {
             id: known.id,
             path: known.path,
             category,
             platform,
             reason: reason.to_string(),
-            default_action: Inclusion::Include,
+            default_action,
             sensitive: false,
             portable: Portability::PortableWithPathTranslation,
         });
@@ -376,7 +411,13 @@ pub fn discover(adapter: &dyn PlatformAdapter, config: &Config) -> Vec<ProfileSo
             tracing::warn!(path = %path.display(), "included path does not exist");
             continue;
         }
-        if out.iter().any(|s| s.path == path) {
+        if let Some(existing) = out.iter_mut().find(|s| s.path == path) {
+            // Including an opt-in source by path turns it on; including a
+            // source that is already selected is a no-op.
+            if existing.default_action == Inclusion::OptIn {
+                existing.default_action = Inclusion::Include;
+                existing.reason = format!("{} — included by user", existing.reason);
+            }
             continue;
         }
         let id = match path.strip_prefix(&home) {
@@ -400,13 +441,18 @@ pub fn discover(adapter: &dyn PlatformAdapter, config: &Config) -> Vec<ProfileSo
         });
     }
 
-    // Drop nested sources: a source inside another selected source would be
-    // backed up twice. Keep the outer one unless the inner is opt-in.
-    let paths: Vec<PathBuf> = out.iter().map(|s| s.path.clone()).collect();
+    // Drop nested sources: a source inside another *selected* source would be
+    // backed up twice, so keep the outer one. A source beneath an opt-in
+    // parent (`~/Library/Application Support/k9s`) stands on its own.
+    let selected_roots: Vec<PathBuf> = out
+        .iter()
+        .filter(|s| s.default_action == Inclusion::Include)
+        .map(|s| s.path.clone())
+        .collect();
     out.retain(|s| {
-        !paths.iter().any(|other| {
-            other != &s.path && s.path.starts_with(other) && s.default_action == Inclusion::Include
-        }) || s.default_action != Inclusion::Include
+        !selected_roots
+            .iter()
+            .any(|outer| outer != &s.path && s.path.starts_with(outer))
     });
 
     out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -440,6 +486,7 @@ mod tests {
         for d in [
             ".ssh",
             "Documents",
+            "Downloads",
             "Movies",
             "Library/Application Support",
             "Library/Containers",
@@ -468,8 +515,96 @@ mod tests {
             .find(|s| s.id.as_str() == "containers")
             .unwrap();
         assert_eq!(containers.default_action, Inclusion::OptIn);
+        for id in ["downloads", "app_support"] {
+            let s = sources.iter().find(|s| s.id.as_str() == id).unwrap();
+            assert_eq!(s.default_action, Inclusion::OptIn, "{id} is opt-in");
+        }
         let sel = selected(&sources, &config);
-        assert!(sel.iter().all(|s| s.id.as_str() != "containers"));
+        for id in ["containers", "downloads", "app_support"] {
+            assert!(sel.iter().all(|s| s.id.as_str() != id), "{id} not selected");
+        }
+    }
+
+    #[test]
+    fn including_an_opt_in_source_turns_it_on() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        for d in ["Downloads", "Library/Application Support"] {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        let adapter = MacOsAdapter::with_home(home.clone());
+        let mut config = Config::default();
+        config
+            .include
+            .push(crate::config::PathRule::new("~/Downloads"));
+        let sources = discover(&adapter, &config);
+        let downloads = sources
+            .iter()
+            .find(|s| s.id.as_str() == "downloads")
+            .unwrap();
+        assert_eq!(downloads.default_action, Inclusion::Include);
+        assert!(
+            !sources.iter().any(|s| s.id.as_str() == "custom:Downloads"),
+            "keeps the semantic id rather than adding a custom source"
+        );
+        let app = sources
+            .iter()
+            .find(|s| s.id.as_str() == "app_support")
+            .unwrap();
+        assert_eq!(app.default_action, Inclusion::OptIn);
+        let sel = selected(&sources, &config);
+        assert!(sel.iter().any(|s| s.id.as_str() == "downloads"));
+        assert!(sel.iter().all(|s| s.id.as_str() != "app_support"));
+    }
+
+    #[test]
+    fn k9s_is_a_default_source_beneath_opt_in_app_support() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("Library/Application Support/k9s")).unwrap();
+        std::fs::create_dir_all(home.join(".config/k9s")).unwrap();
+        let adapter = MacOsAdapter::with_home(home.clone());
+        let config = Config::default();
+        let sources = discover(&adapter, &config);
+        let sel: Vec<&str> = selected(&sources, &config)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(
+            sel,
+            vec!["config", "k9s"],
+            "App Support k9s stands alone; .config/k9s folds into config"
+        );
+        let k9s = sources.iter().find(|s| s.id.as_str() == "k9s").unwrap();
+        assert_eq!(k9s.path, home.join("Library/Application Support/k9s"));
+        assert_eq!(k9s.category, ProfileCategory::Development);
+    }
+
+    #[test]
+    fn include_beneath_an_opt_in_parent_is_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().to_path_buf();
+        std::fs::create_dir_all(home.join("Library/Application Support/Sublime Text")).unwrap();
+        let adapter = MacOsAdapter::with_home(home.clone());
+        let mut config = Config::default();
+        config.include.push(crate::config::PathRule::new(
+            "~/Library/Application Support/Sublime Text",
+        ));
+        let sources = discover(&adapter, &config);
+        let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.contains(&"custom:Library/Application Support/Sublime Text"),
+            "{ids:?}"
+        );
+        assert!(
+            ids.contains(&"app_support"),
+            "parent stays listed as opt-in"
+        );
+        let sel: Vec<&str> = selected(&sources, &config)
+            .iter()
+            .map(|s| s.id.as_str())
+            .collect();
+        assert_eq!(sel, vec!["custom:Library/Application Support/Sublime Text"]);
     }
 
     #[test]

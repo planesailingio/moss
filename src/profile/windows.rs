@@ -84,6 +84,7 @@ pub fn destination_for(
         "shell" => home.to_path_buf(),
         "config" => home.join(".config"),
         "app_support" => appdata(home),
+        "k9s" => local_appdata(home).join("k9s"),
         other => {
             if let Some((_, p)) = resolved.iter().find(|(i, _)| i.as_str() == other) {
                 return Some(p.clone());
@@ -153,6 +154,10 @@ mod tests {
         assert_eq!(
             destination_for(home, &redirected, &SemanticId::new("video")).unwrap(),
             home.join("Videos")
+        );
+        assert_eq!(
+            destination_for(home, &[], &SemanticId::new("k9s")).unwrap(),
+            local_appdata(home).join("k9s")
         );
         assert_eq!(destination_for(home, &[], &SemanticId::new("nope")), None);
     }

@@ -543,6 +543,10 @@ Public
 
 `~/Desktop`, `~/Documents` and `~/Downloads` also carry `everyone deny delete` ACLs (verified).
 
+**`~/Downloads` is opt-in on every platform.** It is a landing zone for installers, archives and
+transient files rather than a place people keep things. `inspect` lists it under Opt-in and
+`moss include ~/Downloads` turns it on, keeping the `downloads` semantic id.
+
 The standard directories may contain a `.localized` marker (on the development machine all eight do, Desktop included — an earlier draft claimed Desktop did not). Finder displays a translated name while the on-disk name stays English. **Back up the on-disk name.**
 
 Other relevant locations:
@@ -556,6 +560,7 @@ Other relevant locations:
 ~/.claude
 ~/.codex
 ~/.config
+~/.config/k9s                     (nested under ~/.config; same `k9s` id as the App Support path)
 ~/.docker
 ~/.gitconfig
 ~/.gnupg
@@ -564,9 +569,16 @@ Other relevant locations:
 ~/.talos
 ~/.terraform.d
 ~/.zshrc
-~/Library/Application Support
+~/Library/Application Support/k9s
 ~/Library/Preferences
 ```
+
+`~/Library/Application Support` is discovered but **opt-in**: it is large, mostly app-managed
+state that reinstalls regenerate, and it holds moss's and Kopia's own state. `moss include
+"~/Library/Application Support"` turns it on with the `app_support` semantic id. Individual
+tools that keep state there are listed as their own sources with their own ids (`k9s`) so they are
+backed up by default and restore onto the platform's equivalent path (`~/.config/k9s` on Linux,
+`%LOCALAPPDATA%\k9s` on Windows).
 
 Never include cloud-drive roots (Nextcloud, OneDrive, Dropbox, Box, iCloud Drive) — they are already replicated, frequently enormous, and often contain reparse-point-like placeholder files.
 

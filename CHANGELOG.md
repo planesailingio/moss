@@ -53,7 +53,8 @@ The v1 command surface, on macOS, Linux and Windows, against Kopia 0.23.x.
   `recovery show`, and the `kopia` escape hatch that runs Kopia with moss's config file and
   credentials.
 - Profile discovery: macOS user-template directories with a `~/Library` allowlist and opt-in
-  Containers; Linux XDG user directories with localised names resolved from `user-dirs.dirs`,
+  Containers, Application Support and Downloads (`moss include` by path turns an opt-in source
+  on); k9s state as a `k9s` source on every platform; Linux XDG user directories with localised names resolved from `user-dirs.dirs`,
   `/etc/xdg/user-dirs.defaults`, then English; Windows known folders via `SHGetKnownFolderPath`.
   Every path is verified to exist before it becomes a source.
 - Exclusions as gitignore-style patterns evaluated during the walk: build and dependency

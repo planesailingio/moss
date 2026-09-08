@@ -138,14 +138,18 @@ be read (with the reason), and recorded filename collisions. It works offline an
 the repository unless `--estimate` is given.
 
 Defaults are conservative: standard user directories, dotfiles such as `~/.ssh`, `~/.aws`,
-`~/.gnupg`, `~/.kube`, `~/.docker`, `~/.gitconfig` and shell configuration, `~/.config` and
-platform application-support directories. Caches, `node_modules/`, `target/`, virtualenvs,
-cloud-drive roots, Docker Desktop VM images and moss's and Kopia's own state are excluded by
-gitignore-style patterns applied during the walk. macOS `~/Library/Containers` and
-`Group Containers` are opt-in (`backup.include_containers`).
+`~/.gnupg`, `~/.kube`, `~/.docker`, `~/.gitconfig` and shell configuration, `~/.config`,
+`~/Library/Preferences` and known tool state such as k9s (`~/Library/Application Support/k9s`
+on macOS, `~/.config/k9s` elsewhere; one `k9s` id, so a restore lands in the right place). Caches, `node_modules/`, `target/`, virtualenvs, cloud-drive roots,
+Docker Desktop VM images and moss's and Kopia's own state are excluded by gitignore-style
+patterns applied during the walk. `~/Downloads` and macOS `~/Library/Application Support` are
+opt-in: `inspect` lists them and `moss include` turns them on. `~/Library/Containers` and
+`Group Containers` are opt-in via `backup.include_containers`.
 
 ```bash
 moss include ~/Projects
+moss include ~/Downloads         # opt-in source, by path
+moss include "~/Library/Application Support/Sublime Text"   # one app from an opt-in parent
 moss exclude 'node_modules/'     # any depth
 moss exclude ~/Movies
 ```

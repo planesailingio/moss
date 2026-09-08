@@ -63,6 +63,7 @@ pub fn destination_for(home: &Path, id: &SemanticId) -> Option<PathBuf> {
         "config" => home.join(".config"),
         "app_support" => home.join("Library/Application Support"),
         "preferences" => home.join("Library/Preferences"),
+        "k9s" => home.join("Library/Application Support/k9s"),
         other => {
             let name = TEMPLATE_DIRS.iter().find(|(i, _)| *i == other)?.1;
             home.join(name)
@@ -117,6 +118,10 @@ mod tests {
         assert_eq!(
             destination_for(home, &SemanticId::new("ssh")).unwrap(),
             PathBuf::from("/Users/rhys/.ssh")
+        );
+        assert_eq!(
+            destination_for(home, &SemanticId::new("k9s")).unwrap(),
+            PathBuf::from("/Users/rhys/Library/Application Support/k9s")
         );
         assert_eq!(destination_for(home, &SemanticId::new("nope")), None);
         assert_eq!(

@@ -57,6 +57,7 @@ pub fn destination_for(
         "shell" => home.to_path_buf(),
         "config" => xdg::config_home(home),
         "app_support" => xdg::data_home(home),
+        "k9s" => xdg::config_home(home).join("k9s"),
         other => {
             let key = XDG_TO_ID.iter().find(|(_, i)| *i == other)?.0;
             resolved.get(key).cloned()?
@@ -132,5 +133,12 @@ mod tests {
             a.destination_for(&SemanticId::new("ssh")).unwrap(),
             home.join(".ssh")
         );
+        if std::env::var_os("XDG_CONFIG_HOME").is_none() {
+            assert_eq!(
+                a.destination_for(&SemanticId::new("k9s")).unwrap(),
+                home.join(".config/k9s"),
+                "macOS Application Support/k9s lands in XDG config on Linux"
+            );
+        }
     }
 }
