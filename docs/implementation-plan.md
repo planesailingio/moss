@@ -193,11 +193,13 @@ contents, and exit 9 when a subtree is made unreadable.
 - Fetch and validate the manifest first; treat every path in it as untrusted.
 - Two-stage per §16: `snapshot restore` into `<state>/staging/<run>/<source>` with
   `--write-sparse-files`, then placement through the containment layer.
-- Containment: Linux `rustix::fs::openat2` with `ResolveFlags::IN_ROOT`, falling back on `ENOSYS`
-  to a component-wise `O_NOFOLLOW | O_DIRECTORY` walk; macOS `openat` with a locally defined
-  `O_RESOLVE_BENEATH = 0x1000`; Windows component-wise traversal checking reparse points and
-  comparing volume serial plus file index from `winapi-util`. The validated descriptor or handle is
-  the thing written to; no path string is re-resolved.
+- Containment: Linux `rustix::fs::openat2` with `IN_ROOT | NO_MAGICLINKS | NO_SYMLINKS`, falling
+  back on `ENOSYS` to a component-wise `O_NOFOLLOW | O_DIRECTORY` walk; macOS and other Unixes use
+  that walk (`O_RESOLVE_BENEATH` follows in-root symlinks, so it is not used); Windows opens every
+  component with `NtCreateFile` relative to the verified parent handle and renames and deletes
+  through `NtSetInformationFile`. The validated descriptor or handle is the thing written to; no
+  path string is re-resolved (symlink creation on Windows is the one documented exception,
+  re-verified through the handle afterwards).
 - Semantic mapping through the destination `PlatformAdapter`; `user_home` and `custom:*` map to the
   current user's home; `video` maps to `~/Movies` or `~/Videos`; category/destination sanity check.
 - Conflict policy `skip | overwrite | backup | interactive`; diff only for text.

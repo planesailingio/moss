@@ -116,7 +116,7 @@ several crates in the previous revision of this list were deprecated or had chan
 | Randomness | `getrandom` 0.4 (`fill`) | `rand` 0.10 renamed `OsRng`; not needed |
 | Recovery code | `bip39` 2.2 (`std`, `zeroize`, English) | 32 bytes of entropy → 24 words (§6) |
 | Credential store | `keyring` 4.2 | Holds the repository password only. v4 is a facade over `keyring-core` plus store crates; features are `apple-native-keyring-store`, `windows-native-keyring-store`, `zbus-secret-service-keyring-store` (+ one async-runtime feature). The v3 feature names no longer exist. |
-| Containment | `rustix` 1.1 (`fs`, `process`) on Unix; `windows-sys` 0.61 + `winapi-util` 0.1 on Windows | `rustix::fs::openat2` + `ResolveFlags::IN_ROOT`; macOS `O_RESOLVE_BENEATH` is **not in `libc`**, define it locally (§16) |
+| Containment | `rustix` 1.1 (`fs`, `process`) on Unix; `windows-sys` 0.61 (`Wdk_Storage_FileSystem`) on Windows | `rustix::fs::openat2` + `IN_ROOT \| NO_SYMLINKS` on Linux; `openat(O_NOFOLLOW \| O_DIRECTORY)` walk elsewhere; `NtCreateFile` relative opens on Windows (§16) |
 | Lock | std `File::try_lock` (stable since Rust 1.89) | no crate |
 | Progress / TTY | `indicatif` 0.18; `std::io::IsTerminal`; `owo-colors` 4 (`supports-colors`) | honours `NO_COLOR` |
 | Binary lookup | `which` 8 | only for locating `kopia` |
@@ -1228,13 +1228,13 @@ Use real containment primitives:
 
 | Platform | Primitive |
 |---|---|
-| Linux | `openat2` with `RESOLVE_IN_ROOT` |
-| macOS | `openat` with `O_RESOLVE_BENEATH` |
-| Windows | manual component-by-component traversal |
+| Linux | `openat2` with `RESOLVE_IN_ROOT \| RESOLVE_NO_MAGICLINKS \| RESOLVE_NO_SYMLINKS` |
+| macOS (and other Unix) | component-by-component `openat` with `O_NOFOLLOW \| O_DIRECTORY` |
+| Windows | `NtCreateFile` relative to the verified parent handle |
 
 **Linux.** `openat2(2)` landed in kernel 5.6 and has **no glibc wrapper** — call via `syscall(SYS_openat2, ...)` and handle `ENOSYS` on older kernels with a documented fallback. Prefer `RESOLVE_IN_ROOT` over `RESOLVE_BENEATH` for restore: it reinterprets absolute symlinks against the root rather than rejecting them outright, which is friendlier for archive extraction.
 
-**macOS.** `O_RESOLVE_BENEATH` (0x1000) is real, documented in `man 2 open`, and returns `ENOTCAPABLE`. The `libc` crate does **not** define it for Apple targets (it defines a FreeBSD constant of the same name with a different value, `0x00800000`); moss defines `O_RESOLVE_BENEATH: c_int = 0x1000` locally under `cfg(target_os = "macos")` and must never use `libc::O_RESOLVE_BENEATH`. `libc::O_NOFOLLOW_ANY` is present. Verified working on macOS 26.6.2 against `..` escapes, absolute paths, symlinks to `/etc`, and symlink chains climbing out via `../..`. Internal `..` that stays within the root is permitted. Also available: `O_NOFOLLOW_ANY` (macOS 11+, `ELOOP` if *any* component is a symlink) and `O_UNIQUE` (fails if the file has multiple hardlinks).
+**macOS.** `O_RESOLVE_BENEATH` (0x1000) exists (`man 2 open`, returns `ENOTCAPABLE`) but it *follows* symlinks that stay inside the root, so it cannot honour the contract above ("never through a symlink at any component") and moss does not use it. macOS uses the same component walk as every other Unix: each directory is opened with `openat(O_RDONLY | O_DIRECTORY | O_NOFOLLOW)` relative to the previous descriptor (a symlinked component fails with `ENOTDIR` on macOS, `ELOOP` on Linux, and is refused after an `lstat` distinguishes it from a plain file), and the final component is acted on with `O_NOFOLLOW` / `AT_SYMLINK_NOFOLLOW`. Linux adds `RESOLVE_NO_SYMLINKS` to `openat2` for the same reason: `RESOLVE_IN_ROOT` alone re-roots an escaping symlink instead of refusing it, which is safe but makes the journal name a path the bytes did not land at. All Unix code is safe `rustix` calls; there is no `unsafe` in `restore/contain/unix.rs`.
 
 **Windows** has no per-open containment. moss builds one from `NtCreateFile` *relative* opens: each component is opened relative to the **handle** of its verified parent (`OBJECT_ATTRIBUTES.RootDirectory`) with `FILE_OPEN_REPARSE_POINT`, so a symlink or junction is opened itself and never followed. The handle is checked for `FILE_ATTRIBUTE_REPARSE_POINT` (any tag is refused), its volume serial and file id (`GetFileInformationByHandleEx(FileIdInfo)`) are compared with the root's — **never by string prefix** — and it then becomes the parent for the next component. Every write, stat, rename (`NtSetInformationFile(FileRenameInformation)` with a `RootDirectory` handle) and delete (`FileDispositionInformationEx`) acts on such a handle; no path string is re-resolved after validation. The single exception is symlink creation, which Win32 offers only by path: the link is created under the path derived from the verified parent handle and immediately re-verified through that handle, and removed if it did not land there. The documented limit is 63 reparse points per path.
 

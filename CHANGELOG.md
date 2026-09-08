@@ -55,6 +55,21 @@ a major version, additions only.
 
 ### Added
 
+- Kopia metadata commands (`--version`, `repository status`, `maintenance info`) time out after
+  60 s instead of hanging on an unreachable endpoint; Kopia's stderr is forwarded line by line to
+  the `kopia` tracing target under `--verbose`.
+- Every `--json` report is a typed struct pinned by a snapshot test (`src/cli/reports.rs`).
+- `--quiet` now hides only informational chatter; a command's result (tables, the recovery sheet,
+  `config path`) is still printed.
+- I/O errors name the file they concern where the call site knows it.
+
+### Internal
+
+- One built-in source table (`profile/locations.rs`) drives discovery and restore mapping; the
+  module graph is a DAG enforced by `tests/layering.rs`; Kopia sits behind a `KopiaRunner` trait
+  and restore staging behind a `Stager` trait, so backup, restore and doctor logic run under
+  `cargo test` with fixtures; the Unix containment layer has no `unsafe`.
+
 The v1 command surface, on macOS, Linux and Windows, against Kopia 0.23.x.
 
 - `init`: repository create or connect for filesystem and S3-compatible storage

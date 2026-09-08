@@ -25,9 +25,9 @@ The product is the layer above the engine: profile discovery, portability, safet
 
 | OS | Profile discovery | Credential store | Restore containment |
 |---|---|---|---|
-| macOS | Apple's user template directories; `~/Library` allowlist; TCC-aware | Keychain | `openat` with `O_RESOLVE_BENEATH` |
-| Linux | XDG user directories (localised names resolved) and base directories | Secret Service | `openat2` with `RESOLVE_IN_ROOT` |
-| Windows | `SHGetKnownFolderPath` known folders (never hardcoded paths) | Credential Manager | component-by-component walk with reparse-point checks |
+| macOS | Apple's user template directories; `~/Library` allowlist; TCC-aware | Keychain | component-by-component `openat` with `O_NOFOLLOW` |
+| Linux | XDG user directories (localised names resolved) and base directories | Secret Service | `openat2` with `RESOLVE_IN_ROOT` and `RESOLVE_NO_SYMLINKS` |
+| Windows | `SHGetKnownFolderPath` known folders (never hardcoded paths) | Credential Manager | `NtCreateFile` opens relative to the verified parent handle |
 
 Kopia 0.23.0 to 0.23.x is the tested engine range. `moss doctor` reports the installed version;
 `--skip-version-check` proceeds outside the range at your own risk.
