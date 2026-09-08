@@ -74,10 +74,10 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
     let journal_path = ctx.paths.restore_journal();
     let mut resume_state: Option<ResumeState> = None;
     let mut selector = args.selector.clone();
-    if let Some(inc) = journal::load(&journal_path)
-        .ok()
-        .and_then(|r| journal::incomplete(&r))
-    {
+    // A journal that cannot be read describes an interrupted restore in an
+    // unknown state; refuse rather than guess (spec §18).
+    let records = journal::load(&journal_path)?;
+    if let Some(inc) = journal::incomplete(&records) {
         let describe = journal::describe_pending(&inc);
         if args.rollback {
             let summary = journal::rollback(&inc);
@@ -255,11 +255,18 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
         };
 
         // Collisions recorded at backup time vs. this filesystem (spec §12).
-        crate::config::paths::create_private_dir(&root_path)?;
-        let probe = probe_insensitive(&root_path).unwrap_or((
+        // The probe writes marker files, so a dry run uses the platform default
+        // and touches nothing.
+        let default_probe = (
             dest_os.default_fs_case_insensitive(),
             dest_os == crate::platform::Platform::MacOs,
-        ));
+        );
+        let probe = if ctx.global.dry_run {
+            default_probe
+        } else {
+            prepare_root(&root_path, root_override.is_some())?;
+            probe_insensitive(&root_path).unwrap_or(default_probe)
+        };
         let check = check_collisions(&manifest, source, probe, args.rename_collisions);
         if !check.blocked.is_empty() {
             report.collisions.extend(check.blocked);
@@ -279,8 +286,10 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
         }
 
         if ctx.global.dry_run {
-            let root = Root::open(&root_path)?;
-            let exists = root.exists(&dest_rel).ok().flatten().is_some();
+            let exists = Root::open(&root_path)
+                .ok()
+                .and_then(|root| root.exists(&dest_rel).ok().flatten())
+                .is_some();
             report.push_source(SourceReport {
                 id: id.into(),
                 category: source.category,
@@ -396,4 +405,22 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
         println!("{}", report.render_human(&console));
     }
     Ok(code)
+}
+
+/// Make sure the containment root exists without touching its permissions.
+/// A `--to` directory is created (plain `mkdir -p`, the user's umask applies);
+/// the home directory, or a parent of a redirected destination, must already
+/// exist. Restore never changes the mode of a directory it did not create.
+fn prepare_root(root_path: &Path, is_override: bool) -> Result<()> {
+    if root_path.is_dir() {
+        return Ok(());
+    }
+    if is_override {
+        std::fs::create_dir_all(root_path)?;
+        return Ok(());
+    }
+    Err(MossError::Usage(format!(
+        "destination directory {} does not exist; create it first or restore with --to",
+        root_path.display()
+    )))
 }

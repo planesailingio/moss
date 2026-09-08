@@ -3,7 +3,7 @@
 use std::path::Path;
 
 use crate::backup::json::{MaintenanceInfo, RepositoryStatus, SnapshotManifest};
-use crate::backup::kopia::{KopiaContext, KopiaOutput, classify_failure};
+use crate::backup::kopia::{KopiaContext, KopiaOp, KopiaOutput, classify_failure};
 use crate::config::{RepositoryConfig, RepositoryType};
 use crate::error::{MossError, Result};
 use crate::security::secret::Secret;
@@ -106,11 +106,11 @@ fn storage_args(config: &RepositoryConfig) -> Result<Vec<String>> {
     }
 }
 
-fn check(out: KopiaOutput, context: &str) -> Result<KopiaOutput> {
+fn check(out: KopiaOutput, context: &str, op: KopiaOp) -> Result<KopiaOutput> {
     if out.success() {
         Ok(out)
     } else {
-        Err(classify_failure(&out, context))
+        Err(classify_failure(&out, context, op))
     }
 }
 
@@ -135,7 +135,12 @@ impl<'a> Repository<'a> {
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
         let env = s3.map(S3Credentials::env).unwrap_or_default();
         let out = self.ctx.run_connect(self.password, &refs, &env)?;
-        check(out, &self.context())?;
+        let op = if verb == "create" {
+            KopiaOp::Create
+        } else {
+            KopiaOp::Connect
+        };
+        check(out, &self.context(), op)?;
         crate::config::paths::make_private_file(&self.ctx.config_file)?;
         Ok(())
     }
@@ -171,6 +176,7 @@ impl<'a> Repository<'a> {
             self.ctx
                 .run(self.password, &["repository", "status", "--json"], &[])?,
             &self.context(),
+            KopiaOp::Connect,
         )?;
         // Never log `out.stdout` (spec §5).
         serde_json::from_str(&out.stdout).map_err(|e| MossError::Kopia {
@@ -190,6 +196,7 @@ impl<'a> Repository<'a> {
             self.ctx
                 .run(self.password, &["policy", "set", &p, "--clear-ignore"], &[])?,
             &self.context(),
+            KopiaOp::Other,
         )?;
         let mut args: Vec<String> = vec![
             "policy".into(),
@@ -203,7 +210,11 @@ impl<'a> Repository<'a> {
             args.push(format!("--add-ignore={r}"));
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        check(self.ctx.run(self.password, &refs, &[])?, &self.context())?;
+        check(
+            self.ctx.run(self.password, &refs, &[])?,
+            &self.context(),
+            KopiaOp::Other,
+        )?;
         Ok(())
     }
 
@@ -226,7 +237,7 @@ impl<'a> Repository<'a> {
         let out = self.ctx.run(self.password, &refs, &[])?;
         let manifests = parse_manifests(&out.stdout);
         if manifests.is_empty() {
-            return Err(classify_failure(&out, &self.context()));
+            return Err(classify_failure(&out, &self.context(), KopiaOp::Snapshot));
         }
         Ok(manifests)
     }
@@ -243,7 +254,11 @@ impl<'a> Repository<'a> {
             args.push(format!("{k}:{v}"));
         }
         let refs: Vec<&str> = args.iter().map(String::as_str).collect();
-        let out = check(self.ctx.run(self.password, &refs, &[])?, &self.context())?;
+        let out = check(
+            self.ctx.run(self.password, &refs, &[])?,
+            &self.context(),
+            KopiaOp::Other,
+        )?;
         if out.stdout.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -273,7 +288,11 @@ impl<'a> Repository<'a> {
         if skip_owners {
             args.insert(2, "--skip-owners");
         }
-        check(self.ctx.run(self.password, &args, &[])?, &self.context())?;
+        check(
+            self.ctx.run(self.password, &args, &[])?,
+            &self.context(),
+            KopiaOp::Other,
+        )?;
         Ok(())
     }
 
@@ -306,7 +325,11 @@ impl<'a> Repository<'a> {
         if delete {
             args.push("--delete");
         }
-        check(self.ctx.run(self.password, &args, &[])?, &self.context())
+        check(
+            self.ctx.run(self.password, &args, &[])?,
+            &self.context(),
+            KopiaOp::Other,
+        )
     }
 
     pub fn maintenance_info(&self) -> Result<MaintenanceInfo> {
@@ -314,6 +337,7 @@ impl<'a> Repository<'a> {
             self.ctx
                 .run(self.password, &["maintenance", "info", "--json"], &[])?,
             &self.context(),
+            KopiaOp::Other,
         )?;
         serde_json::from_str(&out.stdout).map_err(|e| MossError::Kopia {
             message: "Could not parse `kopia maintenance info --json`.".into(),
@@ -326,7 +350,11 @@ impl<'a> Repository<'a> {
         if full {
             args.push("--full");
         }
-        check(self.ctx.run(self.password, &args, &[])?, &self.context())
+        check(
+            self.ctx.run(self.password, &args, &[])?,
+            &self.context(),
+            KopiaOp::Other,
+        )
     }
 
     /// Escape hatch: forward arbitrary arguments with moss's environment.

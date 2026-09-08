@@ -135,10 +135,14 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
                         (1, entry.metadata().map(|m| m.len()).unwrap_or(0))
                     };
                     let mut s = shared.lock().unwrap();
-                    let e = s.out.excluded.entry(kind).or_default();
+                    // `measured` holds only if every entry of this kind was.
+                    let e = s.out.excluded.entry(kind).or_insert(ExcludedStats {
+                        measured: true,
+                        ..ExcludedStats::default()
+                    });
                     e.entries += entries;
                     e.size += size;
-                    e.measured = measure || !is_dir;
+                    e.measured &= measure || !is_dir;
                     false
                 }
                 Verdict::Include => {
@@ -204,7 +208,7 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
                         Err(e) => {
                             let io =
                                 io_of(&e).unwrap_or_else(|| std::io::Error::other(e.to_string()));
-                            record_error(&shared, &home, path, &io);
+                            record_error(&shared, counters.as_ref(), &home, path, &io);
                             return WalkState::Continue;
                         }
                     };
@@ -258,7 +262,7 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
                         other => (PathBuf::new(), io_of(other)),
                     };
                     let e = io.unwrap_or_else(|| std::io::Error::other(err.to_string()));
-                    record_error(&shared, &home, &path, &e);
+                    record_error(&shared, counters.as_ref(), &home, &path, &e);
                 }
             }
             WalkState::Continue
@@ -343,8 +347,17 @@ impl IntoRaw for std::io::Error {
     }
 }
 
-fn record_error(shared: &Arc<Mutex<Shared>>, home: &Path, path: &Path, e: &std::io::Error) {
+fn record_error(
+    shared: &Arc<Mutex<Shared>>,
+    counters: Option<&Arc<Counters>>,
+    home: &Path,
+    path: &Path,
+    e: &std::io::Error,
+) {
     let (reason, errno) = classify_io_error(e);
+    if let Some(c) = counters {
+        c.skipped.fetch_add(1, Ordering::Relaxed);
+    }
     let mut s = shared.lock().unwrap();
     s.skipped_abs.push(path.to_path_buf());
     s.out.skipped.push(Skipped {

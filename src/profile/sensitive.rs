@@ -99,7 +99,7 @@ pub fn classify(home_relative: &str) -> Option<SensitiveKind> {
     if lower == ".git-credentials" || lower == "git-credentials" {
         return Some(SensitiveKind::GitCredentials);
     }
-    if lower == ".netrc" || lower == "_netrc" || lower == ".npmrc" && false {
+    if lower == ".netrc" || lower == "_netrc" {
         return Some(SensitiveKind::ApiToken);
     }
     if lower == ".env"
@@ -124,11 +124,7 @@ pub fn classify(home_relative: &str) -> Option<SensitiveKind> {
         }
         return Some(SensitiveKind::TlsPrivateKey);
     }
-    if lower == ".npmrc"
-        || lower == ".pypirc"
-        || lower == ".gem/credentials"
-        || lower.ends_with("/credentials") && rel.starts_with(".gem")
-    {
+    if lower == ".npmrc" || lower == ".pypirc" || rel.eq_ignore_ascii_case(".gem/credentials") {
         return Some(SensitiveKind::ApiToken);
     }
     if lower.contains("token")
@@ -146,7 +142,7 @@ pub fn classify(home_relative: &str) -> Option<SensitiveKind> {
     if rel.starts_with(".terraform.d/") && lower == "credentials.tfrc.json" {
         return Some(SensitiveKind::ApiToken);
     }
-    if lower == "krb5cc" || lower.starts_with("krb5cc_") || lower == ".aws/sso/cache" {
+    if lower == "krb5cc" || lower.starts_with("krb5cc_") || rel.starts_with(".aws/sso/cache/") {
         return Some(SensitiveKind::CredentialCache);
     }
     None
@@ -243,6 +239,15 @@ mod tests {
             Some(SensitiveKind::GitCredentials)
         );
         assert_eq!(classify("~/.npmrc"), Some(SensitiveKind::ApiToken));
+        assert_eq!(
+            classify("~/.gem/credentials"),
+            Some(SensitiveKind::ApiToken)
+        );
+        assert_eq!(classify("~/other/.gem/credentials"), None);
+        assert_eq!(
+            classify("~/.aws/sso/cache/abc.json"),
+            Some(SensitiveKind::CredentialCache)
+        );
         assert_eq!(
             classify("~/Downloads/export.1pux"),
             Some(SensitiveKind::PasswordManagerExport)

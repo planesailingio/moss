@@ -1,5 +1,6 @@
-//! Linux containment: `openat2(2)` with `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS`
-//! (spec §16). `openat2` has no glibc wrapper; `rustix` issues the raw syscall.
+//! Linux containment: `openat2(2)` with `RESOLVE_IN_ROOT | RESOLVE_NO_MAGICLINKS
+//! | RESOLVE_NO_SYMLINKS` (spec §16): nothing escapes the root *and* no
+//! component is ever a symlink, matching the component walk exactly. `openat2` has no glibc wrapper; `rustix` issues the raw syscall.
 //! Kernels before 5.6 return `ENOSYS` (some seccomp profiles `EINVAL`); the
 //! caller then falls back to the component-wise `O_NOFOLLOW | O_DIRECTORY`
 //! walk in `unix.rs`. The fallback decision is cached for the process.
@@ -38,7 +39,7 @@ pub fn open_dir_beneath(
             rel.as_c_str(),
             OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
             Mode::empty(),
-            ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS,
+            ResolveFlags::IN_ROOT | ResolveFlags::NO_MAGICLINKS | ResolveFlags::NO_SYMLINKS,
         ) {
             Ok(fd) => return Some(Ok(fd)),
             Err(rustix::io::Errno::NOSYS) | Err(rustix::io::Errno::INVAL) => {

@@ -3,8 +3,9 @@
 //! interrupted restore can be resumed or rolled back on the next run.
 //!
 //! Format: newline-delimited JSON at `<state>/restore-journal.json`. A file
-//! has two records over its life (`intended`, then `done`); the reader folds
-//! them by destination path.
+//! has two records over its life (`intended`, then `done` or `abandoned`); the
+//! reader folds them by destination path. Paths are stored losslessly (see
+//! [`path_codec`]): two distinct non-UTF-8 names must never alias.
 
 use std::collections::{BTreeMap, HashSet};
 use std::fs::{File, OpenOptions};
@@ -30,22 +31,120 @@ pub enum Action {
 pub enum State {
     Intended,
     Done,
+    /// The intention was given up (write failed, destination cleaned up). Not
+    /// pending, so no resume; not done, so a resumed run writes it again.
+    Abandoned,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub run_id: String,
     pub source_id: String,
-    /// Absolute destination path as written (display form).
-    pub dest_path: String,
+    /// Absolute destination path.
+    #[serde(with = "path_codec")]
+    pub dest_path: PathBuf,
     pub action: Action,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decision: Option<String>,
     pub state: State,
     /// For `backup_existing`: where the original was moved to.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub backup_path: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "path_codec::opt"
+    )]
+    pub backup_path: Option<PathBuf>,
     pub at: chrono::DateTime<chrono::Utc>,
+}
+
+/// Lossless path (de)serialisation: a UTF-8 path is a plain JSON string; any
+/// other path is `{"bytes": [...]}` on Unix or `{"wide": [...]}` on Windows,
+/// rebuilt with the platform's safe constructor. A journal written on the
+/// other family is rejected rather than guessed at.
+mod path_codec {
+    use std::path::{Path, PathBuf};
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    #[derive(Serialize, Deserialize)]
+    #[serde(untagged)]
+    enum Repr {
+        Utf8(String),
+        Bytes { bytes: Vec<u8> },
+        Wide { wide: Vec<u16> },
+    }
+
+    fn to_repr(p: &Path) -> Repr {
+        if let Some(s) = p.to_str() {
+            return Repr::Utf8(s.to_string());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            Repr::Bytes {
+                bytes: p.as_os_str().as_bytes().to_vec(),
+            }
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            Repr::Wide {
+                wide: p.as_os_str().encode_wide().collect(),
+            }
+        }
+    }
+
+    fn from_repr<E: serde::de::Error>(r: Repr) -> Result<PathBuf, E> {
+        match r {
+            Repr::Utf8(s) => Ok(PathBuf::from(s)),
+            #[cfg(unix)]
+            Repr::Bytes { bytes } => {
+                use std::os::unix::ffi::OsStringExt;
+                Ok(PathBuf::from(std::ffi::OsString::from_vec(bytes)))
+            }
+            #[cfg(windows)]
+            Repr::Wide { wide } => {
+                use std::os::windows::ffi::OsStringExt;
+                Ok(PathBuf::from(std::ffi::OsString::from_wide(&wide)))
+            }
+            #[allow(unreachable_patterns)]
+            other => Err(E::custom(format!(
+                "journal path was written on another OS family ({})",
+                match other {
+                    Repr::Bytes { .. } => "unix bytes",
+                    Repr::Wide { .. } => "windows wide",
+                    Repr::Utf8(_) => "utf8",
+                }
+            ))),
+        }
+    }
+
+    pub fn serialize<S: Serializer>(p: &Path, s: S) -> Result<S::Ok, S::Error> {
+        to_repr(p).serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<PathBuf, D::Error> {
+        from_repr(Repr::deserialize(d)?)
+    }
+
+    pub mod opt {
+        use std::path::{Path, PathBuf};
+
+        use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+        pub fn serialize<S: Serializer>(p: &Option<PathBuf>, s: S) -> Result<S::Ok, S::Error> {
+            p.as_deref().map(super::to_repr).serialize(s)
+        }
+
+        pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<PathBuf>, D::Error> {
+            Option::<super::Repr>::deserialize(d)?
+                .map(super::from_repr)
+                .transpose()
+        }
+
+        #[allow(dead_code)]
+        fn _assert_path_is_used(_: &Path) {}
+    }
 }
 
 /// An open, append-only journal.
@@ -92,11 +191,11 @@ impl Journal {
         let r = Record {
             run_id: run_id.to_string(),
             source_id: source_id.to_string(),
-            dest_path: dest_path.display().to_string(),
+            dest_path: dest_path.to_path_buf(),
             action,
             decision: decision.map(str::to_string),
             state: State::Intended,
-            backup_path: backup_path.map(|p| p.display().to_string()),
+            backup_path: backup_path.map(Path::to_path_buf),
             at: chrono::Utc::now(),
         };
         self.record(&r)?;
@@ -104,8 +203,24 @@ impl Journal {
     }
 
     pub fn done(&mut self, intended: &Record) -> Result<()> {
+        self.settle(intended, State::Done, None)
+    }
+
+    /// Settle an intention that will not be completed: the destination has
+    /// been cleaned up, so the next run must neither offer to resume it nor
+    /// count it as placed.
+    pub fn abandon(&mut self, intended: &Record, reason: &str) -> Result<()> {
+        self.settle(
+            intended,
+            State::Abandoned,
+            Some(format!("abandoned: {reason}")),
+        )
+    }
+
+    fn settle(&mut self, intended: &Record, state: State, decision: Option<String>) -> Result<()> {
         let r = Record {
-            state: State::Done,
+            state,
+            decision: decision.or_else(|| intended.decision.clone()),
             at: chrono::Utc::now(),
             ..intended.clone()
         };
@@ -127,23 +242,35 @@ pub fn remove(path: &Path) -> Result<()> {
     }
 }
 
-/// Read every record. A missing file is an empty journal; a truncated last
-/// line (crash mid-write) is ignored.
+/// Read every record. A missing file is an empty journal; a truncated *last*
+/// line (crash mid-write) is ignored. Damage anywhere else is an integrity
+/// failure: skipping a record would hide a `done` from rollback, which would
+/// then delete a completed file.
 pub fn load(path: &Path) -> Result<Vec<Record>> {
     let file = match File::open(path) {
         Ok(f) => f,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e.into()),
     };
+    let lines: Vec<String> = BufReader::new(file)
+        .lines()
+        .collect::<std::io::Result<_>>()?;
     let mut out = Vec::new();
-    for line in BufReader::new(file).lines() {
-        let line = line?;
+    let last = lines.len().saturating_sub(1);
+    for (i, line) in lines.iter().enumerate() {
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<Record>(&line) {
+        match serde_json::from_str::<Record>(line) {
             Ok(r) => out.push(r),
-            Err(_) => break,
+            Err(_) if i == last => break,
+            Err(e) => {
+                return Err(MossError::Integrity(format!(
+                    "restore journal {} is damaged at line {}: {e}. Inspect it before deciding whether to remove it; --resume and --rollback refuse to guess.",
+                    path.display(),
+                    i + 1
+                )));
+            }
         }
     }
     Ok(out)
@@ -156,9 +283,9 @@ pub struct Incomplete {
     /// Writes and symlinks that were intended but never marked done.
     pub pending: Vec<Record>,
     /// Originals moved aside (`backup_existing` done) keyed by destination.
-    pub backups: BTreeMap<String, Record>,
+    pub backups: BTreeMap<PathBuf, Record>,
     /// Destinations whose write completed.
-    pub done: HashSet<String>,
+    pub done: HashSet<PathBuf>,
 }
 
 impl Incomplete {
@@ -172,7 +299,7 @@ pub fn incomplete(records: &[Record]) -> Option<Incomplete> {
     if records.is_empty() {
         return None;
     }
-    let mut state: BTreeMap<(String, Action), Record> = BTreeMap::new();
+    let mut state: BTreeMap<(PathBuf, Action), Record> = BTreeMap::new();
     let mut backups = BTreeMap::new();
     let mut run_id = String::new();
     for r in records {
@@ -195,6 +322,7 @@ pub fn incomplete(records: &[Record]) -> Option<Incomplete> {
             State::Done => {
                 done.insert(dest);
             }
+            State::Abandoned => {}
         }
     }
     if pending.is_empty() {
@@ -211,8 +339,8 @@ pub fn incomplete(records: &[Record]) -> Option<Incomplete> {
 /// State carried into a `--resume` run.
 #[derive(Debug, Clone, Default)]
 pub struct ResumeState {
-    pub done: HashSet<String>,
-    pub pending: HashSet<String>,
+    pub done: HashSet<PathBuf>,
+    pub pending: HashSet<PathBuf>,
 }
 
 impl ResumeState {
@@ -224,11 +352,11 @@ impl ResumeState {
     }
 
     pub fn is_done(&self, dest: &Path) -> bool {
-        self.done.contains(&dest.display().to_string())
+        self.done.contains(dest)
     }
 
     pub fn is_pending(&self, dest: &Path) -> bool {
-        self.pending.contains(&dest.display().to_string())
+        self.pending.contains(dest)
     }
 }
 
@@ -245,11 +373,10 @@ pub struct RollbackSummary {
 pub fn rollback(inc: &Incomplete) -> RollbackSummary {
     let mut summary = RollbackSummary::default();
     for r in &inc.pending {
-        let dest = PathBuf::from(&r.dest_path);
+        let dest = &r.dest_path;
+        let shown = dest.display().to_string();
         let (Some(parent), Some(name)) = (dest.parent(), dest.file_name()) else {
-            summary
-                .failed
-                .push((r.dest_path.clone(), "not a file path".into()));
+            summary.failed.push((shown, "not a file path".into()));
             continue;
         };
         let name = Path::new(name);
@@ -257,27 +384,27 @@ pub fn rollback(inc: &Incomplete) -> RollbackSummary {
             Ok(root) => root,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
             Err(e) => {
-                summary.failed.push((r.dest_path.clone(), e.to_string()));
+                summary.failed.push((shown, e.to_string()));
                 continue;
             }
         };
         match root.exists(name) {
             Ok(Some(m)) if !m.is_dir() => match root.remove_file(name) {
-                Ok(()) => summary.removed.push(r.dest_path.clone()),
-                Err(e) => summary.failed.push((r.dest_path.clone(), e.to_string())),
+                Ok(()) => summary.removed.push(shown.clone()),
+                Err(e) => summary.failed.push((shown.clone(), e.to_string())),
             },
             Ok(_) => {}
-            Err(e) => summary.failed.push((r.dest_path.clone(), e.to_string())),
+            Err(e) => summary.failed.push((shown.clone(), e.to_string())),
         }
-        if let Some(backup) = inc.backups.get(&r.dest_path)
+        if let Some(backup) = inc.backups.get(dest)
             && let Some(backup_path) = &backup.backup_path
-            && let Some(backup_name) = Path::new(backup_path).file_name()
+            && let Some(backup_name) = backup_path.file_name()
         {
             match root.rename_within(Path::new(backup_name), name) {
-                Ok(()) => summary.restored_backups.push(r.dest_path.clone()),
+                Ok(()) => summary.restored_backups.push(shown.clone()),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => summary.failed.push((
-                    backup_path.clone(),
+                    backup_path.display().to_string(),
                     format!("could not restore original: {e}"),
                 )),
             }
@@ -300,7 +427,7 @@ pub fn describe_pending(inc: &Incomplete) -> String {
             Action::Mkdir => "directory",
             Action::BackupExisting => "backup",
         };
-        lines.push(format!("  {:<8} {}", what, r.dest_path));
+        lines.push(format!("  {:<8} {}", what, r.dest_path.display()));
     }
     if inc.pending.len() > 20 {
         lines.push(format!("  … and {} more", inc.pending.len() - 20));
@@ -354,8 +481,8 @@ mod tests {
         let inc = incomplete(&records).unwrap();
         assert_eq!(inc.run_id, "R1");
         assert_eq!(inc.pending.len(), 1);
-        assert_eq!(inc.pending[0].dest_path, "/h/.ssh/b");
-        assert!(inc.done.contains("/h/.ssh/a"));
+        assert_eq!(inc.pending[0].dest_path, Path::new("/h/.ssh/b"));
+        assert!(inc.done.contains(Path::new("/h/.ssh/a")));
         let resume = ResumeState::from_incomplete(&inc);
         assert!(resume.is_done(Path::new("/h/.ssh/a")));
         assert!(resume.is_pending(Path::new("/h/.ssh/b")));
@@ -423,5 +550,96 @@ mod tests {
         assert!(!backup.exists());
         assert!(!other.exists());
         assert!(home.join(".ssh/kept").exists());
+    }
+
+    #[test]
+    fn abandoned_is_neither_pending_nor_done() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("journal");
+        let mut j = Journal::open(&path).unwrap();
+        let a = j
+            .intend(
+                "R1",
+                "ssh",
+                Path::new("/h/.ssh/a"),
+                Action::Write,
+                None,
+                None,
+            )
+            .unwrap();
+        j.abandon(&a, "disk full").unwrap();
+        let b = j
+            .intend(
+                "R1",
+                "ssh",
+                Path::new("/h/.ssh/b"),
+                Action::Write,
+                None,
+                None,
+            )
+            .unwrap();
+        drop(j);
+        let records = load(&path).unwrap();
+        assert_eq!(records[1].state, State::Abandoned);
+        assert_eq!(records[1].decision.as_deref(), Some("abandoned: disk full"));
+        let inc = incomplete(&records).unwrap();
+        assert_eq!(inc.pending, vec![b]);
+        assert!(!inc.done.contains(Path::new("/h/.ssh/a")));
+        let resume = ResumeState::from_incomplete(&inc);
+        assert!(!resume.is_done(Path::new("/h/.ssh/a")));
+        assert!(!resume.is_pending(Path::new("/h/.ssh/a")));
+    }
+
+    #[test]
+    fn damage_before_the_last_line_is_an_integrity_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("journal");
+        let mut j = Journal::open(&path).unwrap();
+        let a = j
+            .intend(
+                "R1",
+                "ssh",
+                Path::new("/h/.ssh/a"),
+                Action::Write,
+                None,
+                None,
+            )
+            .unwrap();
+        j.done(&a).unwrap();
+        drop(j);
+        let mut text = std::fs::read_to_string(&path).unwrap();
+        text.insert_str(0, "{\"garbage\": tru\n");
+        std::fs::write(&path, text).unwrap();
+        let err = load(&path).unwrap_err();
+        assert_eq!(err.exit_code().code(), 8, "{err}");
+        assert!(err.to_string().contains("line 1"), "{err}");
+    }
+
+    #[test]
+    fn non_utf8_paths_round_trip_without_aliasing() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStrExt;
+            let tmp = tempfile::tempdir().unwrap();
+            let path = tmp.path().join("journal");
+            let mut j = Journal::open(&path).unwrap();
+            let p1 = PathBuf::from(std::ffi::OsStr::from_bytes(b"/h/\xff\xfe"));
+            let p2 = PathBuf::from(std::ffi::OsStr::from_bytes(b"/h/\xfe\xff"));
+            assert_eq!(
+                p1.display().to_string(),
+                p2.display().to_string(),
+                "lossy forms alias"
+            );
+            let a = j.intend("R1", "x", &p1, Action::Write, None, None).unwrap();
+            j.done(&a).unwrap();
+            j.intend("R1", "x", &p2, Action::Write, None, None).unwrap();
+            drop(j);
+            let inc = incomplete(&load(&path).unwrap()).unwrap();
+            assert!(inc.done.contains(&p1));
+            assert_eq!(inc.pending[0].dest_path, p2);
+            let resume = ResumeState::from_incomplete(&inc);
+            assert!(resume.is_done(&p1));
+            assert!(!resume.is_done(&p2));
+        }
     }
 }

@@ -316,11 +316,32 @@ fn redact_args(args: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Which Kopia verb failed. A missing path means "no repository here" when
+/// connecting or creating, but "the source directory is gone" during a
+/// snapshot; the classifier must know which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KopiaOp {
+    Connect,
+    Create,
+    Snapshot,
+    Other,
+}
+
 /// Translate Kopia stderr into a typed error (spec §37). Raw text goes to
 /// `detail`, shown only under --verbose.
-pub fn classify_failure(out: &KopiaOutput, context: &str) -> MossError {
+pub fn classify_failure(out: &KopiaOutput, context: &str, op: KopiaOp) -> MossError {
     let err = out.stderr.to_ascii_lowercase();
     let detail = out.stderr.trim().to_string();
+    let storage_missing =
+        err.contains("no such file or directory") || err.contains("cannot access storage path");
+    if storage_missing && op == KopiaOp::Snapshot {
+        return MossError::Kopia {
+            message: format!(
+                "A source path could not be read while taking the snapshot. {context}"
+            ),
+            detail,
+        };
+    }
     if err.contains("invalid repository password") || err.contains("invalid password") {
         return MossError::AuthFailure {
             context: context.to_string(),
@@ -334,8 +355,7 @@ pub fn classify_failure(out: &KopiaOutput, context: &str) -> MossError {
     if err.contains("repository not initialized")
         || err.contains("not a kopia repository")
         || err.contains("kopia.repository")
-        || err.contains("no such file or directory")
-        || err.contains("cannot access storage path")
+        || (storage_missing && matches!(op, KopiaOp::Connect | KopiaOp::Create))
     {
         return MossError::RepositoryNotInitialised {
             context: context.to_string(),
@@ -405,25 +425,35 @@ mod tests {
         assert_eq!(
             classify_failure(
                 &out("failed to open repository: invalid repository password"),
-                "x"
+                "x",
+                KopiaOp::Connect
             )
             .exit_code()
             .code(),
             4
         );
         assert_eq!(
-            classify_failure(&out("can't connect to storage: cannot access storage path: stat /x: no such file or directory"), "x")
+            classify_failure(&out("can't connect to storage: cannot access storage path: stat /x: no such file or directory"), "x", KopiaOp::Connect)
                 .exit_code()
                 .code(),
             3
         );
+        // The same text during a snapshot means the *source* vanished, not
+        // that the repository is missing.
+        let gone = classify_failure(
+            &out("error: lstat /Users/x/Downloads: no such file or directory"),
+            "x",
+            KopiaOp::Snapshot,
+        );
+        assert_eq!(gone.exit_code().code(), 1);
+        assert!(gone.to_string().contains("source path"), "{gone}");
         assert_eq!(
-            classify_failure(&out("dial tcp: connection refused"), "x")
+            classify_failure(&out("dial tcp: connection refused"), "x", KopiaOp::Connect)
                 .exit_code()
                 .code(),
             3
         );
-        let generic = classify_failure(&out("something odd"), "ctx");
+        let generic = classify_failure(&out("something odd"), "ctx", KopiaOp::Other);
         assert_eq!(generic.exit_code().code(), 1);
         assert_eq!(generic.verbose_detail(), Some("something odd"));
     }

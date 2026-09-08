@@ -51,9 +51,10 @@ impl Console {
         }
     }
 
-    /// Prompts are possible only on an interactive terminal (spec §32).
+    /// Prompts are possible only on an interactive terminal, and never in
+    /// `--json` mode, which is machine mode (spec §32).
     pub fn can_prompt(&self) -> bool {
-        !self.non_interactive && self.stdout_tty && std::io::stdin().is_terminal()
+        !self.non_interactive && !self.json && self.stdout_tty && std::io::stdin().is_terminal()
     }
 
     /// Print a human line (suppressed by --json and --quiet).
@@ -158,7 +159,8 @@ pub fn confirm(console: &Console, question: &str, default_yes: bool) -> crate::e
         )));
     }
     let suffix = if default_yes { "[Y/n]" } else { "[y/N]" };
-    let mut out = std::io::stdout().lock();
+    // Prompts go to stderr so stdout stays a clean report stream.
+    let mut out = std::io::stderr().lock();
     let _ = write!(out, "{question} {suffix} ");
     let _ = out.flush();
     drop(out);
@@ -179,7 +181,7 @@ pub fn prompt_line(console: &Console, question: &str) -> crate::error::Result<St
             "Input is required: {question}"
         )));
     }
-    let mut out = std::io::stdout().lock();
+    let mut out = std::io::stderr().lock();
     let _ = write!(out, "{question} ");
     let _ = out.flush();
     drop(out);
@@ -202,6 +204,15 @@ mod tests {
         let text = serde_json::to_string(&v).unwrap();
         assert!(text.starts_with("{\"schema_version\":1"));
         assert_eq!(v["a"], 1);
+    }
+
+    #[test]
+    fn json_mode_never_prompts() {
+        let mut c = Console::for_tests();
+        c.non_interactive = false;
+        c.stdout_tty = true;
+        c.json = true;
+        assert!(!c.can_prompt());
     }
 
     #[test]

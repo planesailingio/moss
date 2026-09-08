@@ -142,9 +142,10 @@ pub fn parse_repository_url(url: &str) -> Result<RepositoryConfig> {
     Ok(repo)
 }
 
-/// A stable, filename-safe id derived from the storage location.
+/// A stable, filename-safe id derived from the storage location. FNV-1a over
+/// the key bytes: the id names the keychain entry and the Kopia config file,
+/// so it must not depend on the Rust toolchain (`DefaultHasher` does).
 pub fn repository_id(repo: &RepositoryConfig) -> String {
-    use std::hash::{Hash, Hasher};
     let key = match repo.kind {
         RepositoryType::Filesystem => format!(
             "fs:{}",
@@ -160,9 +161,15 @@ pub fn repository_id(repo: &RepositoryConfig) -> String {
             repo.prefix.clone().unwrap_or_default()
         ),
     };
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    key.hash(&mut h);
-    format!("{:016x}", h.finish())
+    format!("{:016x}", fnv1a64(key.as_bytes()))
+}
+
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    bytes
+        .iter()
+        .fold(OFFSET, |h, b| (h ^ u64::from(*b)).wrapping_mul(PRIME))
 }
 
 #[cfg(test)]
@@ -181,5 +188,15 @@ mod tests {
         assert!(parse_repository_url("ftp://x").is_err());
         assert!(parse_repository_url("s3://").is_err());
         assert_ne!(fs.id, s3.id);
+    }
+
+    /// The id is a persisted contract (keychain entry, Kopia config file name);
+    /// this pins the algorithm so a refactor can never silently change it.
+    #[test]
+    fn repository_id_is_stable() {
+        assert_eq!(fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
+        assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
+        let fs = parse_repository_url("/tmp/repo").unwrap();
+        assert_eq!(fs.id, "71c0c64b14b241b7");
     }
 }

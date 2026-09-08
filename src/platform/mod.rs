@@ -36,9 +36,7 @@ impl Platform {
             Platform::Windows
         }
         #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-        {
-            Platform::Linux
-        }
+        compile_error!("moss supports macOS, Linux and Windows only");
     }
 
     pub fn display_name(self) -> &'static str {
@@ -124,9 +122,7 @@ pub fn current_adapter() -> Box<dyn PlatformAdapter> {
         Box::new(crate::profile::windows::WindowsAdapter::detect())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
-    {
-        Box::new(crate::profile::linux::LinuxAdapter::detect())
-    }
+    compile_error!("moss supports macOS, Linux and Windows only");
 }
 
 pub fn host_info(adapter: &dyn PlatformAdapter) -> HostInfo {

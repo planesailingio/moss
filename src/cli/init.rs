@@ -174,6 +174,9 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
                 }
                 Err(MossError::RepositoryNotInitialised { .. }) => {
                     r.create(s3.as_ref())?;
+                    // The password may have come from the environment; make
+                    // sure the configured store has it too.
+                    store.set_password(&repo.id, &pw)?;
                     (pw, true)
                 }
                 Err(MossError::AuthFailure { .. }) => {
@@ -207,15 +210,14 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
 
     // Discovery (spec §8): written into config so the user can see and edit it.
     config.sources = discovery::discover(adapter.as_ref(), &config);
-    let now = chrono::Utc::now();
-    if created || repo.created_at.is_none() {
-        repo.created_at = Some(now);
-    }
+    // Re-init keeps what the previous configuration knew about this
+    // repository; only a genuine create stamps a new creation time.
     if let Some(prev) = config.repository.as_ref().filter(|r| r.id == repo.id) {
         repo.recovery_acknowledged_at = prev.recovery_acknowledged_at;
-        if repo.created_at.is_none() {
-            repo.created_at = prev.created_at;
-        }
+        repo.created_at = prev.created_at;
+    }
+    if created || repo.created_at.is_none() {
+        repo.created_at = Some(chrono::Utc::now());
     }
     config.repository = Some(repo.clone());
     ctx.save_config(&config)?;
@@ -232,7 +234,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
             endpoint: repo.endpoint.as_deref(),
             created: &repo
                 .created_at
-                .unwrap_or(now)
+                .unwrap_or_else(chrono::Utc::now)
                 .format("%Y-%m-%d")
                 .to_string(),
             profile: &identity,

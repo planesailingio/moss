@@ -16,7 +16,7 @@ use crate::platform::Platform;
 use crate::profile::model::home_relative;
 use crate::restore::conflict::{Decision, Existing, Resolver, Staged};
 use crate::restore::contain::{self, Root};
-use crate::restore::journal::{Action, Journal, Record, ResumeState};
+use crate::restore::journal::{Action, Journal, ResumeState};
 use crate::restore::report::{CollisionFailure, ConflictCounts, Rename, SkippedEntry};
 
 /// Everything placement needs beyond the root and the staged tree.
@@ -379,6 +379,9 @@ fn copy_file(
     let mut src = std::fs::File::open(staged)?;
     let mut dst = root.open_for_write(dest_rel, mode)?;
     io::copy(&mut src, &mut dst)?;
+    // The journal marks this file done right after we return; make sure the
+    // bytes are durable first, or a crash leaves a `done` for an empty file.
+    dst.sync_data()?;
     if let Some(m) = modified {
         let _ = dst.set_modified(m);
     }
@@ -457,18 +460,6 @@ fn place_symlink(
         }
     }
     Ok(())
-}
-
-impl Journal {
-    /// Settle an intention that will not be completed: the destination has
-    /// been cleaned up, so the next run must not offer to resume it.
-    pub fn abandon(&mut self, intended: &Record, reason: &str) -> Result<()> {
-        let settled = Record {
-            decision: Some(format!("abandoned: {reason}")),
-            ..intended.clone()
-        };
-        self.done(&settled)
-    }
 }
 
 /// The outcome of checking a source's recorded collisions against the
@@ -763,10 +754,8 @@ mod tests {
         std::fs::write(ssh.join("config"), b"done-earlier").unwrap();
         std::fs::write(ssh.join("id_ed25519"), b"half").unwrap();
         let mut resume = ResumeState::default();
-        resume.done.insert(ssh.join("config").display().to_string());
-        resume
-            .pending
-            .insert(ssh.join("id_ed25519").display().to_string());
+        resume.done.insert(ssh.join("config"));
+        resume.pending.insert(ssh.join("id_ed25519"));
         let out = run(
             &fx,
             ConflictPolicy::Skip,

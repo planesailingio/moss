@@ -3,10 +3,11 @@
 //! Restore writes attacker-influenceable data with the user's full privileges,
 //! so every write goes through a [`Root`]: a directory handle opened once, with
 //! each relative path validated *and opened in one operation* by the platform's
-//! real containment primitive — `openat2(RESOLVE_IN_ROOT)` on Linux,
-//! `openat(O_RESOLVE_BENEATH)` on macOS, a component-wise walk elsewhere. The
-//! descriptor or handle that comes back is what gets written; no path string is
-//! re-resolved afterwards (TOCTOU, spec §16).
+//! real containment primitive — `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`
+//! on Linux, a component-wise `O_NOFOLLOW` walk on other Unixes, handle-relative
+//! opens on Windows. Every implementation refuses a symlink at *any* component.
+//! The descriptor or handle that comes back is what gets written; no path
+//! string is re-resolved afterwards (TOCTOU, spec §16).
 //!
 //! `O_NOFOLLOW` guards only the final component and is used for exactly that.
 
@@ -20,8 +21,6 @@ use std::time::SystemTime;
 
 #[cfg(target_os = "linux")]
 mod linux;
-#[cfg(target_os = "macos")]
-mod macos;
 #[cfg(unix)]
 mod unix;
 #[cfg(windows)]
@@ -303,20 +302,12 @@ mod tests {
             }
         }
 
+        /// Every Unix implementation refuses a symlinked component outright
+        /// (Linux via `RESOLVE_NO_SYMLINKS`, the rest via `O_NOFOLLOW`).
         fn assert_refused(result: io::Result<impl std::fmt::Debug>, what: &str) {
-            // Linux `RESOLVE_IN_ROOT` re-roots an escaping symlink instead of
-            // refusing it: the write then either lands nowhere (ENOENT,
-            // because `<root>/outside` does not exist) or, for a `..` chain
-            // that climbs past the root, back inside the root itself. Either
-            // way nothing escapes, which the callers verify on disk.
-            let linux = cfg!(target_os = "linux");
             match result {
-                Ok(v) => assert!(linux, "{what}: expected refusal, got {v:?}"),
-                Err(e) => {
-                    let ok =
-                        is_containment_error(&e) || (linux && e.kind() == io::ErrorKind::NotFound);
-                    assert!(ok, "{what}: unexpected error {e:?}");
-                }
+                Ok(v) => panic!("{what}: expected refusal, got {v:?}"),
+                Err(e) => assert!(is_containment_error(&e), "{what}: unexpected error {e:?}"),
             }
         }
 

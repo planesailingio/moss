@@ -335,6 +335,39 @@ fn restore_round_trip_with_conflicts_and_path_report() {
         .success()
         .stdout(predicate::str::contains("Nothing was written"));
 
+    // A dry run under --to never creates the directory, and no probe files
+    // are left in home (spec §16).
+    let planned = env._tmp.path().join("planned");
+    moss(&env)
+        .args([
+            "restore",
+            "latest",
+            "--dry-run",
+            "--non-interactive",
+            "--to",
+        ])
+        .arg(&planned)
+        .assert()
+        .success();
+    assert!(
+        !planned.exists(),
+        "dry run must not create the --to directory"
+    );
+    assert!(
+        walk(&env.home)
+            .iter()
+            .all(|p| !p.to_string_lossy().contains(".moss-probe")),
+        "dry run must not leave probe files"
+    );
+
+    // Restore never changes the mode of the home directory it writes into.
+    #[cfg(unix)]
+    let home_mode_before = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&env.home, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::metadata(&env.home).unwrap().permissions().mode() & 0o777
+    };
+
     // Restore under --to: layout is home-relative, modes preserved, exit 0.
     let dest = env._tmp.path().join("dest");
     let out = moss(&env)
@@ -430,6 +463,17 @@ fn restore_round_trip_with_conflicts_and_path_report() {
     // Journal and staging are cleaned up after a completed run.
     assert!(!env.moss_home.join("state/restore-journal.json").exists());
     assert!(!env.moss_home.join("state/staging").exists());
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let after = fs::metadata(&env.home).unwrap().permissions().mode() & 0o777;
+        assert_eq!(
+            after, home_mode_before,
+            "restore must not chmod the home directory"
+        );
+        assert_eq!(after, 0o755);
+    }
 }
 
 fn walk(dir: &Path) -> Vec<PathBuf> {

@@ -28,12 +28,12 @@ impl Lock {
             Ok(true) => {}
             Ok(false) => {
                 let (pid, started) = read_holder(&mut file);
-                if pid != 0 && !process_alive(pid) {
-                    // Stale lock from a killed process whose OS lock somehow
-                    // persisted (should not happen; advisory locks die with the
-                    // process). Retry once.
-                    lock_blocking(&file)?;
-                } else {
+                // A dead pid with the OS lock still held means a new holder
+                // has locked but not yet written its pid. Retry once without
+                // blocking: a scheduler-facing CLI must never wait on another
+                // run, it exits 10 and names what it saw.
+                let acquired = pid != 0 && !process_alive(pid) && try_lock(&file)?;
+                if !acquired {
                     return Err(MossError::AlreadyRunning {
                         pid,
                         started,
@@ -83,11 +83,6 @@ fn try_lock(file: &File) -> io::Result<bool> {
 }
 
 #[cfg(not(windows))]
-fn lock_blocking(file: &File) -> io::Result<()> {
-    file.lock()
-}
-
-#[cfg(not(windows))]
 fn unlock(file: &File) -> io::Result<()> {
     file.unlock()
 }
@@ -128,12 +123,6 @@ fn try_lock(file: &File) -> io::Result<bool> {
         Err(e) if e.raw_os_error() == Some(ERROR_LOCK_VIOLATION as i32) => Ok(false),
         Err(e) => Err(e),
     }
-}
-
-#[cfg(windows)]
-fn lock_blocking(file: &File) -> io::Result<()> {
-    use windows_sys::Win32::Storage::FileSystem::LOCKFILE_EXCLUSIVE_LOCK;
-    lock_windows(file, LOCKFILE_EXCLUSIVE_LOCK)
 }
 
 #[cfg(windows)]

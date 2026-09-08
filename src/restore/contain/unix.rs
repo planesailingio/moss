@@ -1,9 +1,11 @@
 //! Unix containment: a root directory descriptor plus `*at` calls on a parent
 //! descriptor that was itself opened beneath the root.
 //!
-//! The parent directory is opened by the platform primitive
-//! (`openat2(RESOLVE_IN_ROOT)` on Linux, `openat(O_RESOLVE_BENEATH)` on macOS,
-//! the component walk below elsewhere). The final component is then acted on
+//! The parent directory is opened by `openat2(RESOLVE_IN_ROOT | NO_SYMLINKS)`
+//! on Linux and by the component walk below (`O_NOFOLLOW | O_DIRECTORY` per
+//! component) everywhere else, including macOS, whose `O_RESOLVE_BENEATH`
+//! follows in-root symlinks and so cannot honour the "never through a symlink"
+//! contract. The final component is then acted on
 //! with `O_NOFOLLOW` / `AT_SYMLINK_NOFOLLOW` so a symlink there is never
 //! followed. Nothing re-resolves a path string after that.
 
@@ -26,7 +28,8 @@ pub fn cstr(s: &OsStr) -> io::Result<CString> {
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
 }
 
-/// Join validated components with `/` for a single `openat` call.
+/// Join validated components with `/` for a single `openat2` call.
+#[cfg(target_os = "linux")]
 pub fn join_comps(comps: &[OsString]) -> io::Result<CString> {
     let mut bytes = Vec::new();
     for (i, c) in comps.iter().enumerate() {
@@ -44,8 +47,6 @@ pub fn join_comps(comps: &[OsString]) -> io::Result<CString> {
 pub fn map_escape(e: io::Error, full: &Path, reason: &str) -> io::Error {
     match e.raw_os_error() {
         Some(libc::ELOOP) | Some(libc::EMLINK) => refused(full, reason),
-        #[cfg(target_os = "macos")]
-        Some(libc::ENOTCAPABLE) => refused(full, reason),
         _ => e,
     }
 }
@@ -55,7 +56,6 @@ fn last_error() -> io::Error {
 }
 
 /// Open one directory component beneath `dir`, never following a symlink.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
 pub fn open_component(dir: BorrowedFd<'_>, name: &CStr, full: &Path) -> io::Result<OwnedFd> {
     // SAFETY: `name` is a valid C string and `dir` an open descriptor.
     let fd = unsafe {
@@ -84,8 +84,7 @@ pub fn open_component(dir: BorrowedFd<'_>, name: &CStr, full: &Path) -> io::Resu
 
 /// The generic component-by-component walk. Rejects any symlinked component
 /// (`ELOOP` from `O_NOFOLLOW | O_DIRECTORY`). The Linux fallback and the
-/// primitive on other Unixes; exercised by tests everywhere.
-#[cfg_attr(target_os = "macos", allow(dead_code))]
+/// primitive on every other Unix.
 pub fn walk(root: BorrowedFd<'_>, comps: &[OsString], full: &Path) -> io::Result<OwnedFd> {
     let mut cur = root.try_clone_to_owned()?;
     for c in comps {
@@ -109,16 +108,8 @@ pub fn open_dir_beneath(
         if let Some(result) = super::linux::open_dir_beneath(root, comps, full) {
             return result;
         }
-        walk(root, comps, full)
     }
-    #[cfg(target_os = "macos")]
-    {
-        super::macos::open_dir_beneath(root, comps, full)
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        walk(root, comps, full)
-    }
+    walk(root, comps, full)
 }
 
 fn split_last<'a>(comps: &'a [OsString], full: &Path) -> io::Result<(&'a [OsString], CString)> {
