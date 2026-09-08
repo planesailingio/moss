@@ -116,7 +116,6 @@ pub fn execute(
     let manifest = req.manifest;
     let origin = Origin {
         home: manifest.source_home.clone(),
-        os: manifest.source_os,
         user: manifest.source_user.clone(),
     };
     let mut report = RestoreReport::new(

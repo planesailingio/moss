@@ -8,38 +8,25 @@ use crate::model::{ProfileCategory, ProfileSource};
 
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
+/// Every section defaults as a whole: a missing field takes the value from
+/// `Default`, stated once per type below.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct Config {
-    #[serde(default = "default_schema")]
     pub schema_version: u32,
-    #[serde(default)]
     pub profile: ProfileSection,
-    #[serde(default)]
     pub repository: Option<RepositoryConfig>,
-    #[serde(default)]
     pub backup: BackupSection,
-    #[serde(default)]
     pub restore: RestoreSection,
-    #[serde(default)]
     pub safety: SafetySection,
-    #[serde(default)]
     pub limits: LimitsSection,
-    #[serde(default)]
     pub yubikey: YubiKeySection,
     /// User-added sources (`moss include`).
-    #[serde(default)]
     pub include: Vec<PathRule>,
     /// User exclusions: gitignore-style patterns or paths (`moss exclude`).
-    #[serde(default)]
     pub exclude: Vec<PathRule>,
     /// Discovered sources, written at `init` (spec §8 "Discovery output").
-    #[serde(default)]
     pub sources: Vec<ProfileSource>,
-}
-
-fn default_schema() -> u32 {
-    CONFIG_SCHEMA_VERSION
 }
 
 impl Default for Config {
@@ -168,19 +155,12 @@ pub struct LocalRepositoryConfig {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct BackupSection {
-    #[serde(default = "yes")]
     pub include_sensitive: bool,
-    #[serde(default)]
     pub follow_symlinks: bool,
     /// Opt-in for macOS `~/Library/Containers` and `Group Containers` (spec §8).
-    #[serde(default)]
     pub include_containers: bool,
-}
-
-fn yes() -> bool {
-    true
 }
 
 impl Default for BackupSection {
@@ -211,11 +191,9 @@ pub struct RestoreSection {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct SafetySection {
-    #[serde(default = "yes")]
     pub warn_on_sensitive: bool,
-    #[serde(default = "yes")]
     pub allow_sensitive: bool,
 }
 
@@ -229,24 +207,11 @@ impl Default for SafetySection {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(default, deny_unknown_fields)]
 pub struct LimitsSection {
-    #[serde(default = "default_source_gb")]
     pub max_source_size_gb: u64,
-    #[serde(default = "default_total_gb")]
     pub max_total_size_gb: u64,
-    #[serde(default = "default_file_count")]
     pub max_file_count: u64,
-}
-
-fn default_source_gb() -> u64 {
-    10
-}
-fn default_total_gb() -> u64 {
-    100
-}
-fn default_file_count() -> u64 {
-    1_000_000
 }
 
 impl Default for LimitsSection {

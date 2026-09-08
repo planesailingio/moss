@@ -5,7 +5,7 @@
 //! propagated: it carries almost no information (spec §18).
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Process exit codes. Stable within a major version (spec §23).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -160,8 +160,41 @@ pub enum MossError {
     #[error("{0}")]
     Other(String),
 
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
+    /// An I/O failure, with the path when the call site knew it (`IoAt::at`).
+    #[error("{}", io_message(path.as_deref(), source))]
+    Io {
+        path: Option<PathBuf>,
+        #[source]
+        source: std::io::Error,
+    },
+}
+
+fn io_message(path: Option<&Path>, source: &std::io::Error) -> String {
+    match path {
+        Some(p) => format!("{}: {source}", p.display()),
+        None => source.to_string(),
+    }
+}
+
+impl From<std::io::Error> for MossError {
+    fn from(source: std::io::Error) -> Self {
+        MossError::Io { path: None, source }
+    }
+}
+
+/// Attach the path to an I/O result: `std::fs::write(&p, ..).at(&p)?`. A bare
+/// `?` still works and yields a message without the path.
+pub trait IoAt<T> {
+    fn at(self, path: &Path) -> Result<T>;
+}
+
+impl<T> IoAt<T> for std::io::Result<T> {
+    fn at(self, path: &Path) -> Result<T> {
+        self.map_err(|source| MossError::Io {
+            path: Some(path.to_path_buf()),
+            source,
+        })
+    }
 }
 
 impl MossError {
@@ -183,7 +216,9 @@ impl MossError {
             MossError::Integrity(_) => ExitCode::Integrity,
             MossError::Partial(_) => ExitCode::PartialSuccess,
             MossError::YubiKey(_) => ExitCode::YubiKeyUnavailable,
-            MossError::Kopia { .. } | MossError::Other(_) | MossError::Io(_) => ExitCode::General,
+            MossError::Kopia { .. } | MossError::Other(_) | MossError::Io { .. } => {
+                ExitCode::General
+            }
         }
     }
 
@@ -262,5 +297,20 @@ mod tests {
             13
         );
         assert_eq!(MossError::Partial(String::new()).exit_code().code(), 9);
+    }
+
+    #[test]
+    fn io_errors_name_the_path_when_known() {
+        let bare: MossError = std::io::Error::from(std::io::ErrorKind::PermissionDenied).into();
+        assert!(!bare.to_string().contains('/'));
+        let err =
+            std::io::Result::<()>::Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+                .at(Path::new("/x/state/index.json"))
+                .unwrap_err();
+        assert!(
+            err.to_string().starts_with("/x/state/index.json: "),
+            "{err}"
+        );
+        assert_eq!(err.exit_code(), ExitCode::General);
     }
 }

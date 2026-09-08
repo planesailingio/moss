@@ -34,7 +34,7 @@ pub struct WalkOutput {
     pub largest_files: Vec<(PathBuf, u64)>,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 pub struct ExcludedStats {
     pub entries: u64,
     /// Bytes for excluded *files*; excluded directories are not descended, so
@@ -45,12 +45,29 @@ pub struct ExcludedStats {
 
 pub struct WalkOptions<'a> {
     pub home: &'a Path,
-    pub rules: &'a RuleSet,
+    /// Shared with the walker's worker threads (`filter_entry` wants `'static`).
+    pub rules: Arc<RuleSet>,
     pub index: Option<&'a ScanIndex>,
     pub counters: Option<Arc<Counters>>,
     pub threads: usize,
     pub measure_excluded: bool,
     pub follow_links: bool,
+}
+
+impl<'a> WalkOptions<'a> {
+    /// Single-threaded, no index, no counters, no measuring: what most tests
+    /// and one-off walks want.
+    pub fn new(home: &'a Path, rules: Arc<RuleSet>) -> Self {
+        WalkOptions {
+            home,
+            rules,
+            index: None,
+            counters: None,
+            threads: 1,
+            measure_excluded: false,
+            follow_links: false,
+        }
+    }
 }
 
 #[derive(Default)]
@@ -61,6 +78,9 @@ struct Shared {
     /// Absolute paths that were skipped; their ancestors are never cached so a
     /// later run re-walks them and records the skip again.
     skipped_abs: Vec<PathBuf>,
+    /// Every child name seen per directory (included, excluded and cached
+    /// alike, since `filter_entry` sees them all), for the collision check.
+    names: BTreeMap<PathBuf, Vec<String>>,
 }
 
 /// Walk one source root.
@@ -108,22 +128,30 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
     // filter_entry decides descent: exclusions and cached subtrees are pruned here.
     {
         let shared = Arc::clone(&shared);
-        let rules_home = opts.home.to_path_buf();
         let index_dirs: Arc<BTreeMap<PathBuf, DirStats>> =
             Arc::new(opts.index.map(|i| i.dirs.clone()).unwrap_or_default());
-        let rules: &RuleSet = opts.rules;
-        // SAFETY of lifetime: WalkBuilder::filter_entry requires 'static; we
-        // clone what we need. RuleSet is borrowed for the walk duration only
-        // through a raw pointer wrapper because ignore's API demands 'static.
-        let rules_ptr = RulesPtr(rules as *const RuleSet);
+        // `filter_entry` requires a `'static` closure; the rule set is shared
+        // by reference count, so nothing is borrowed across threads.
+        let rules = Arc::clone(&opts.rules);
         let measure = opts.measure_excluded;
         let counters = opts.counters.clone();
         builder.filter_entry(move |entry: &DirEntry| {
-            let rules = rules_ptr.get();
             let path = entry.path();
             let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
             if entry.depth() == 0 {
                 return true;
+            }
+            // Record the name under its parent before deciding anything, so
+            // the collision check sees the directory's complete listing
+            // without a second `read_dir`.
+            if let Some(parent) = path.parent() {
+                shared
+                    .lock()
+                    .unwrap()
+                    .names
+                    .entry(parent.to_path_buf())
+                    .or_default()
+                    .push(entry.file_name().to_string_lossy().into_owned());
             }
             match rules.verdict(path, is_dir) {
                 Verdict::Exclude(kind) => {
@@ -170,18 +198,6 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
                                     c.bytes.fetch_add(cached.size, Ordering::Relaxed);
                                 }
                                 return false;
-                            }
-                        }
-                        // Collision check on the directory's own listing.
-                        if let Ok(rd) = std::fs::read_dir(path) {
-                            let names: Vec<String> = rd
-                                .filter_map(|e| e.ok())
-                                .map(|e| e.file_name().to_string_lossy().into_owned())
-                                .collect();
-                            let rel = home_relative(path, &rules_home);
-                            let found = collisions::check_directory(&rel, &names);
-                            if !found.is_empty() {
-                                shared.lock().unwrap().out.collisions.extend(found);
                             }
                         }
                     }
@@ -270,6 +286,15 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
     });
 
     let mut s = shared.lock().unwrap();
+    // Collision check per directory, on the complete listing gathered during
+    // the walk (spec §12).
+    let names = std::mem::take(&mut s.names);
+    for (dir, children) in &names {
+        let rel = home_relative(dir, opts.home);
+        s.out
+            .collisions
+            .extend(collisions::check_directory(&rel, children));
+    }
     // Roll direct aggregates up into subtree stats, deepest first.
     let mut subtree: BTreeMap<PathBuf, DirStats> = std::mem::take(&mut s.out.dir_stats);
     let mut dirs: Vec<PathBuf> = s.direct.keys().cloned().collect();
@@ -313,22 +338,6 @@ pub fn walk_source(root: &Path, opts: &WalkOptions<'_>) -> WalkOutput {
     }
     std::mem::take(&mut s.out)
 }
-
-/// `WalkBuilder::filter_entry` demands a `'static + Send + Sync` closure, but
-/// the rule set only needs to live for the walk. `walk_source` joins every
-/// worker before returning, so the borrow is sound for the closure's lifetime.
-struct RulesPtr(*const RuleSet);
-impl RulesPtr {
-    fn get(&self) -> &RuleSet {
-        // SAFETY: see the type-level comment; the pointee is immutable and
-        // outlives every use (all walker threads are joined by `walker.run`).
-        unsafe { &*self.0 }
-    }
-}
-// SAFETY: RuleSet is Send + Sync (Gitignore, PathBufs, HashMap) and is only
-// read through this pointer.
-unsafe impl Send for RulesPtr {}
-unsafe impl Sync for RulesPtr {}
 
 fn io_of(err: &ignore::Error) -> Option<std::io::Error> {
     err.io_error()
@@ -419,17 +428,13 @@ mod tests {
     #[test]
     fn excludes_are_pruned_and_counted() {
         let (_tmp, home) = fixture();
-        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let rules = Arc::new(RuleSet::build(&Config::default(), &home, &[]).unwrap());
         let out = walk_source(
             &home.join("git"),
             &WalkOptions {
-                home: &home,
-                rules: &rules,
-                index: None,
-                counters: None,
                 threads: 2,
                 measure_excluded: false,
-                follow_links: false,
+                ..WalkOptions::new(&home, Arc::clone(&rules))
             },
         );
         assert_eq!(out.files, 3, "main.rs, .env, Makefile");
@@ -448,17 +453,13 @@ mod tests {
     #[test]
     fn measure_excluded_sizes_excluded_trees() {
         let (_tmp, home) = fixture();
-        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let rules = Arc::new(RuleSet::build(&Config::default(), &home, &[]).unwrap());
         let out = walk_source(
             &home.join("git"),
             &WalkOptions {
-                home: &home,
-                rules: &rules,
-                index: None,
-                counters: None,
                 threads: 1,
                 measure_excluded: true,
-                follow_links: false,
+                ..WalkOptions::new(&home, Arc::clone(&rules))
             },
         );
         let b = out.excluded[&ExclusionKind::BuildArtifact];
@@ -475,17 +476,13 @@ mod tests {
         std::fs::create_dir(&locked).unwrap();
         std::fs::write(locked.join("f"), b"x").unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let rules = Arc::new(RuleSet::build(&Config::default(), &home, &[]).unwrap());
         let out = walk_source(
             &home.join("git"),
             &WalkOptions {
-                home: &home,
-                rules: &rules,
-                index: None,
-                counters: None,
                 threads: 2,
                 measure_excluded: false,
-                follow_links: false,
+                ..WalkOptions::new(&home, Arc::clone(&rules))
             },
         );
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -505,15 +502,10 @@ mod tests {
     #[test]
     fn cached_subtrees_are_reused() {
         let (_tmp, home) = fixture();
-        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let rules = Arc::new(RuleSet::build(&Config::default(), &home, &[]).unwrap());
         let opts = |index| WalkOptions {
-            home: &home,
-            rules: &rules,
             index,
-            counters: None,
-            threads: 1,
-            measure_excluded: false,
-            follow_links: false,
+            ..WalkOptions::new(&home, Arc::clone(&rules))
         };
         let first = walk_source(&home.join("git"), &opts(None));
         let index = ScanIndex {
@@ -534,15 +526,10 @@ mod tests {
         let locked = home.join("git/app/locked");
         std::fs::create_dir(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
-        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let rules = Arc::new(RuleSet::build(&Config::default(), &home, &[]).unwrap());
         let opts = |index| WalkOptions {
-            home: &home,
-            rules: &rules,
             index,
-            counters: None,
-            threads: 1,
-            measure_excluded: false,
-            follow_links: false,
+            ..WalkOptions::new(&home, Arc::clone(&rules))
         };
         let first = walk_source(&home.join("git"), &opts(None));
         let root_is_root = unsafe { libc::geteuid() } == 0;
@@ -581,17 +568,13 @@ mod tests {
         std::fs::write(d.join("aux.txt"), b"").unwrap();
         // A case pair can only be created on a case-sensitive filesystem; test
         // the Windows-illegal path here, the pair in collisions.rs.
-        let rules = RuleSet::build(&Config::default(), &home, &[]).unwrap();
+        let rules = Arc::new(RuleSet::build(&Config::default(), &home, &[]).unwrap());
         let out = walk_source(
             &home,
             &WalkOptions {
-                home: &home,
-                rules: &rules,
-                index: None,
-                counters: None,
                 threads: 1,
                 measure_excluded: false,
-                follow_links: false,
+                ..WalkOptions::new(&home, Arc::clone(&rules))
             },
         );
         assert!(out.collisions.iter().any(

@@ -46,7 +46,6 @@ pub struct Existing<'a> {
 pub struct Staged<'a> {
     pub path: &'a Path,
     pub len: u64,
-    pub mode: u32,
     pub modified: Option<SystemTime>,
 }
 
@@ -86,10 +85,6 @@ impl Resolver {
             prompt: Box::new(prompt),
             show: Box::new(show),
         }
-    }
-
-    pub fn policy(&self) -> ConflictPolicy {
-        self.policy
     }
 
     /// Decide for one existing destination.
@@ -464,7 +459,6 @@ mod tests {
         let staged = Staged {
             path: &staged_path,
             len: 8,
-            mode: 0o600,
             modified: None,
         };
         resolver.decide(&existing, &staged)

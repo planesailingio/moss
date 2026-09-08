@@ -14,6 +14,7 @@ use crate::error::{MossError, Result};
 use crate::model::expand_tilde;
 use crate::profile::patterns::{self, ExclusionKind};
 
+#[derive(Clone)]
 pub struct RuleSet {
     home: PathBuf,
     matcher: Gitignore,

@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::{MossError, Result};
+use crate::error::{IoAt, MossError, Result};
 use crate::restore::contain::Root;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -22,7 +22,6 @@ use crate::restore::contain::Root;
 pub enum Action {
     Write,
     Symlink,
-    Mkdir,
     BackupExisting,
 }
 
@@ -158,16 +157,16 @@ impl Journal {
         if let Some(parent) = path.parent() {
             crate::config::paths::create_private_dir(parent)?;
         }
-        let file = OpenOptions::new().create(true).append(true).open(path)?;
+        let file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .at(path)?;
         crate::config::paths::make_private_file(path)?;
         Ok(Journal {
             file,
             path: path.to_path_buf(),
         })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
     }
 
     fn record(&mut self, r: &Record) -> Result<()> {
@@ -286,12 +285,6 @@ pub struct Incomplete {
     pub backups: BTreeMap<PathBuf, Record>,
     /// Destinations whose write completed.
     pub done: HashSet<PathBuf>,
-}
-
-impl Incomplete {
-    pub fn is_empty(&self) -> bool {
-        self.pending.is_empty()
-    }
 }
 
 /// Fold records into the incomplete set. `None` when nothing is pending.
@@ -424,7 +417,6 @@ pub fn describe_pending(inc: &Incomplete) -> String {
         let what = match r.action {
             Action::Write => "file",
             Action::Symlink => "symlink",
-            Action::Mkdir => "directory",
             Action::BackupExisting => "backup",
         };
         lines.push(format!("  {:<8} {}", what, r.dest_path.display()));
@@ -438,11 +430,6 @@ pub fn describe_pending(inc: &Incomplete) -> String {
             .into(),
     );
     lines.join("\n")
-}
-
-/// Convert a `MossError`-free I/O failure into the journal's error type.
-pub fn io_err(e: std::io::Error) -> MossError {
-    MossError::Io(e)
 }
 
 #[cfg(test)]

@@ -78,7 +78,8 @@ pub const DOCKER_VM_PATTERNS: [&str; 2] = [
 ];
 
 /// Which category an excluded path is reported under in `inspect`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ExclusionKind {
     Cache,
     BuildArtifact,

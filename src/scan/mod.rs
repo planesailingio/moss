@@ -9,6 +9,7 @@ pub use progress::ProgressMode;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use serde::Serialize;
 
@@ -52,30 +53,6 @@ pub struct ScanResult {
     pub rescanned: bool,
 }
 
-impl Serialize for ExcludedStats {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        use serde::ser::SerializeStruct;
-        let mut st = s.serialize_struct("ExcludedStats", 3)?;
-        st.serialize_field("entries", &self.entries)?;
-        st.serialize_field("size", &self.size)?;
-        st.serialize_field("measured", &self.measured)?;
-        st.end()
-    }
-}
-
-impl Serialize for ExclusionKind {
-    fn serialize<S: serde::Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
-        s.serialize_str(match self {
-            ExclusionKind::Cache => "cache",
-            ExclusionKind::BuildArtifact => "build_artifact",
-            ExclusionKind::Temporary => "temporary",
-            ExclusionKind::CloudDrive => "cloud_drive",
-            ExclusionKind::OwnState => "own_state",
-            ExclusionKind::UserRule => "user_rule",
-        })
-    }
-}
-
 pub struct ScanOptions {
     pub rescan: bool,
     pub measure_excluded: bool,
@@ -90,7 +67,7 @@ pub fn build_rules(
     adapter: &dyn PlatformAdapter,
     paths: &MossPaths,
     index: &mut ScanIndex,
-) -> Result<RuleSet> {
+) -> Result<Arc<RuleSet>> {
     let home = adapter.home();
     let now = chrono::Utc::now();
     if !index.tool_caches_fresh(now) {
@@ -107,7 +84,7 @@ pub fn build_rules(
     for t in &index.tool_caches {
         extra.push((t.path.clone(), ExclusionKind::Cache));
     }
-    RuleSet::build(config, home, &extra)
+    Ok(Arc::new(RuleSet::build(config, home, &extra)?))
 }
 
 /// Scan the given sources in parallel and refresh the index.
@@ -115,7 +92,7 @@ pub fn scan(
     progress_mode: ProgressMode,
     paths: &MossPaths,
     home: &Path,
-    rules: &RuleSet,
+    rules: &Arc<RuleSet>,
     sources: &[&ProfileSource],
     index: &mut ScanIndex,
     opts: &ScanOptions,
@@ -136,10 +113,9 @@ pub fn scan(
         let chunk = parallelism.max(1);
         let mut results = Vec::new();
         for batch in sources.chunks(chunk) {
-            for (offset, src) in batch.iter().enumerate() {
-                let counters = std::sync::Arc::clone(&counters);
-                let idx = (results.len() + handles.len()) - handles.len() + offset;
-                let _ = idx;
+            for src in batch {
+                let counters = Arc::clone(&counters);
+                let rules = Arc::clone(rules);
                 handles.push(scope.spawn(move || {
                     walk_source(
                         &src.path,

@@ -24,7 +24,6 @@ pub struct Finding {
 #[derive(Debug, Clone)]
 pub struct Origin {
     pub home: String,
-    pub os: Platform,
     pub user: String,
 }
 
@@ -383,7 +382,6 @@ mod tests {
     fn origin() -> Origin {
         Origin {
             home: "/Users/rhys".into(),
-            os: Platform::MacOs,
             user: "rhys".into(),
         }
     }
@@ -567,7 +565,6 @@ mod tests {
         assert!(translate("/usr/bin/x", &o, Path::new("/home/rhys"), Platform::Linux).is_none());
         let win = Origin {
             home: "C:\\Users\\rhys".into(),
-            os: Platform::Windows,
             user: "rhys".into(),
         };
         assert_eq!(
@@ -593,7 +590,6 @@ mod tests {
         // A made-up origin user so the "does it exist here" check is hermetic.
         let origin = Origin {
             home: "/Users/moss-origin-user".into(),
-            os: Platform::MacOs,
             user: "moss-origin-user".into(),
         };
         std::fs::write(

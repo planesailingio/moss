@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::cli::AppContext;
 use crate::error::{ExitCode, Result};
-use crate::model::{Inclusion, ProfileCategory};
+use crate::model::Inclusion;
 use crate::output::human;
 use crate::profile::discovery;
 use crate::scan::{self, ScanOptions, ScanResult};
@@ -364,12 +364,4 @@ pub fn describe_collision(c: &crate::backup::manifest::Collision) -> String {
             format!("path too long for Windows ({length} chars): {path}")
         }
     }
-}
-
-#[allow(dead_code)]
-fn category_order(c: ProfileCategory) -> usize {
-    ProfileCategory::ALL
-        .iter()
-        .position(|x| *x == c)
-        .unwrap_or(99)
 }

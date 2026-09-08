@@ -11,7 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::error::{MossError, Result};
+use crate::error::{IoAt, MossError, Result};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MossPaths {
@@ -21,10 +21,18 @@ pub struct MossPaths {
 }
 
 impl MossPaths {
-    /// Resolve from the environment. `MOSS_STATE_DIR` and `MOSS_CACHE_DIR`
-    /// override the platform defaults (used by tests and schedulers).
+    /// Resolve from the process environment. `MOSS_HOME` puts everything under
+    /// one root; `MOSS_STATE_DIR` and `MOSS_CACHE_DIR` override the platform
+    /// defaults (used by tests and schedulers).
     pub fn resolve() -> Result<MossPaths> {
-        if let Some(root) = std::env::var_os("MOSS_HOME").filter(|s| !s.is_empty()) {
+        MossPaths::resolve_from(|k| std::env::var_os(k))
+    }
+
+    /// `resolve` over an explicit environment lookup, so tests need not
+    /// mutate the process environment.
+    pub fn resolve_from(env: impl Fn(&str) -> Option<std::ffi::OsString>) -> Result<MossPaths> {
+        let var = |k: &str| env(k).filter(|s| !s.is_empty());
+        if let Some(root) = var("MOSS_HOME") {
             let root = PathBuf::from(root);
             return Ok(MossPaths {
                 config_dir: root.join("config"),
@@ -49,10 +57,10 @@ impl MossPaths {
             state_dir,
             cache_dir,
         };
-        if let Some(s) = std::env::var_os("MOSS_STATE_DIR").filter(|s| !s.is_empty()) {
+        if let Some(s) = var("MOSS_STATE_DIR") {
             p.state_dir = PathBuf::from(s);
         }
-        if let Some(c) = std::env::var_os("MOSS_CACHE_DIR").filter(|s| !s.is_empty()) {
+        if let Some(c) = var("MOSS_CACHE_DIR") {
             p.cache_dir = PathBuf::from(c);
         }
         Ok(p)
@@ -129,11 +137,11 @@ fn strip_trailing(p: &Path, name: &str) -> PathBuf {
 
 /// `mkdir -p` with mode 0700 on Unix.
 pub fn create_private_dir(dir: &Path) -> Result<()> {
-    std::fs::create_dir_all(dir)?;
+    std::fs::create_dir_all(dir).at(dir)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700)).at(dir)?;
     }
     Ok(())
 }
@@ -143,7 +151,7 @@ pub fn make_private_file(path: &Path) -> Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).at(path)?;
     }
     #[cfg(not(unix))]
     {
@@ -174,16 +182,27 @@ mod tests {
     #[test]
     fn moss_home_overrides_everything() {
         let tmp = tempfile::tempdir().unwrap();
-        // SAFETY: tests in this module run single-threaded with respect to this variable.
-        unsafe { std::env::set_var("MOSS_HOME", tmp.path()) };
-        let p = MossPaths::resolve().unwrap();
-        unsafe { std::env::remove_var("MOSS_HOME") };
+        let root = tmp.path().as_os_str().to_os_string();
+        let p = MossPaths::resolve_from(|k| (k == "MOSS_HOME").then(|| root.clone())).unwrap();
         assert_eq!(p.config_dir, tmp.path().join("config"));
         assert_eq!(p.state_dir, tmp.path().join("state"));
         assert_eq!(
             p.kopia_config("abc"),
             tmp.path().join("state/kopia/abc.config")
         );
+    }
+
+    #[test]
+    fn state_and_cache_overrides_apply_without_moss_home() {
+        let p = MossPaths::resolve_from(|k| match k {
+            "MOSS_STATE_DIR" => Some("/s".into()),
+            "MOSS_CACHE_DIR" => Some("/c".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(p.state_dir, PathBuf::from("/s"));
+        assert_eq!(p.cache_dir, PathBuf::from("/c"));
+        assert!(p.config_dir.ends_with("moss"));
     }
 
     #[test]

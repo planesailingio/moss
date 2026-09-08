@@ -6,6 +6,8 @@
 use bip39::{Language, Mnemonic};
 use zeroize::Zeroize;
 
+use zeroize::Zeroizing;
+
 use crate::error::{MossError, Result};
 use crate::security::secret::Secret;
 
@@ -26,16 +28,19 @@ pub fn generate() -> Result<Secret> {
 ///
 /// Reports the first word that is not in the list, or a checksum failure.
 pub fn parse(input: &str) -> Result<Secret> {
-    let words: Vec<String> = input
-        .split(|c: char| c.is_whitespace() || c == ',' || c == '-' || c == '.')
-        .filter(|w| !w.is_empty())
-        // Tolerate numbered sheets: "1. abandon" or "1) abandon".
-        .filter(|w| {
-            !w.chars()
-                .all(|c| c.is_ascii_digit() || c == ')' || c == '.')
-        })
-        .map(|w| w.to_lowercase())
-        .collect();
+    // The words *are* the password; keep them in zeroising buffers.
+    let words: Zeroizing<Vec<String>> = Zeroizing::new(
+        input
+            .split(|c: char| c.is_whitespace() || c == ',' || c == '-' || c == '.')
+            .filter(|w| !w.is_empty())
+            // Tolerate numbered sheets: "1. abandon" or "1) abandon".
+            .filter(|w| {
+                !w.chars()
+                    .all(|c| c.is_ascii_digit() || c == ')' || c == '.')
+            })
+            .map(|w| w.to_lowercase())
+            .collect(),
+    );
     if words.len() != WORD_COUNT {
         return Err(MossError::Credential(format!(
             "The recovery code has {} words; expected {WORD_COUNT}.",
@@ -63,7 +68,7 @@ pub fn parse(input: &str) -> Result<Secret> {
             )));
         }
     }
-    let sentence = words.join(" ");
+    let sentence = Zeroizing::new(words.join(" "));
     let mnemonic = Mnemonic::parse_in_normalized(list, &sentence).map_err(|e| {
         MossError::Credential(format!(
             "The recovery code did not validate ({e}). Check each word against the sheet; one is probably transposed or misspelled."

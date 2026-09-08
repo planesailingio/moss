@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 pub use model::*;
 pub use paths::MossPaths;
 
-use crate::error::{MossError, Result};
+use crate::error::{IoAt, MossError, Result};
 
 /// Resolution order: `--config`, `MOSS_CONFIG`, platform default (spec §24).
 pub fn config_path(flag: Option<&Path>, paths: &MossPaths) -> PathBuf {
@@ -60,9 +60,9 @@ pub fn save(path: &Path, cfg: &Config) -> Result<()> {
     }
     let text = render(cfg)?;
     let tmp = path.with_extension("yaml.tmp");
-    std::fs::write(&tmp, text)?;
+    std::fs::write(&tmp, text).at(&tmp)?;
     paths::make_private_file(&tmp)?;
-    std::fs::rename(&tmp, path)?;
+    std::fs::rename(&tmp, path).at(path)?;
     Ok(())
 }
 

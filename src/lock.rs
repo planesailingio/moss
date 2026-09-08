@@ -2,14 +2,13 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::{self, Read, Seek, SeekFrom, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use crate::error::{MossError, Result};
 
 #[derive(Debug)]
 pub struct Lock {
     file: File,
-    path: PathBuf,
 }
 
 impl Lock {
@@ -53,14 +52,7 @@ impl Lock {
         )?;
         file.sync_all()?;
         crate::config::paths::make_private_file(path)?;
-        Ok(Lock {
-            file,
-            path: path.to_path_buf(),
-        })
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
+        Ok(Lock { file })
     }
 }
 

@@ -12,7 +12,7 @@ use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 
-use crate::error::Result;
+use crate::error::{IoAt, Result};
 use crate::profile::tools::ToolCache;
 
 pub const INDEX_SCHEMA_VERSION: u32 = 1;
@@ -67,19 +67,14 @@ impl ScanIndex {
             crate::config::paths::create_private_dir(parent)?;
         }
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self)?)?;
+        std::fs::write(&tmp, serde_json::to_vec(self)?).at(&tmp)?;
         crate::config::paths::make_private_file(&tmp)?;
-        std::fs::rename(&tmp, path)?;
+        std::fs::rename(&tmp, path).at(path)?;
         Ok(())
     }
 
     pub fn age_seconds(&self, now: chrono::DateTime<chrono::Utc>) -> Option<i64> {
         self.refreshed_at.map(|t| (now - t).num_seconds())
-    }
-
-    /// Cached subtree stats if the directory's mtime is unchanged.
-    pub fn cached(&self, dir: &Path, mtime: i64) -> Option<&DirStats> {
-        self.dirs.get(dir).filter(|d| d.mtime == mtime)
     }
 
     /// Tool cache answers are reused for a day.
@@ -119,8 +114,7 @@ mod tests {
         idx.save(&p).unwrap();
         let back = ScanIndex::load(&p);
         assert_eq!(back.dirs, idx.dirs);
-        assert!(back.cached(Path::new("/h/a"), 100).is_some());
-        assert!(back.cached(Path::new("/h/a"), 101).is_none());
+        assert_eq!(back.dirs[Path::new("/h/a")].mtime, 100);
         assert!(back.age_seconds(chrono::Utc::now()).unwrap() < 5);
         assert_eq!(ScanIndex::load(Path::new("/nonexistent")).dirs.len(), 0);
     }

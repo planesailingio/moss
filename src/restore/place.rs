@@ -337,7 +337,6 @@ fn place_file(
     let staged_side = Staged {
         path: staged,
         len: meta.len(),
-        mode: mode.unwrap_or(0o644),
         modified,
     };
     let Some(decision) = resolve_existing(root, dest_rel, &abs, &display, &staged_side, ctx, out)?
@@ -426,7 +425,6 @@ fn place_symlink(
     let staged_side = Staged {
         path: staged,
         len: 0,
-        mode: 0o777,
         modified: None,
     };
     let Some(decision) = resolve_existing(root, dest_rel, &abs, &display, &staged_side, ctx, out)?

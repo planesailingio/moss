@@ -188,8 +188,11 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (case, norm) = probe_insensitive(tmp.path()).unwrap();
         if cfg!(target_os = "macos") {
-            assert!(case && norm, "APFS is case- and normalization-insensitive");
+            // APFS always folds normalization; case folding is a per-volume
+            // format option, so it is not asserted.
+            assert!(norm, "APFS is normalization-insensitive");
         }
+        let _ = case;
         assert!(
             !tmp.path()
                 .join(format!(".moss-probe-{}", std::process::id()))
