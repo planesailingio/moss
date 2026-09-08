@@ -10,6 +10,59 @@ use crate::config::MossPaths;
 use crate::error::{MossError, Result};
 use crate::restore::select::Run;
 
+/// Stage one, behind a trait so the orchestration in `restore::run` can be
+/// exercised without Kopia: the production implementation is [`KopiaStager`];
+/// tests copy fixture trees into place.
+pub trait Stager {
+    fn fetch_manifest(&self, run: &Run) -> Result<Manifest>;
+    /// Restore one source into staging and return where it landed (a
+    /// directory or a single file, whichever the snapshot root is).
+    fn stage_source(&self, source: &ManifestSource, skip_owners: bool) -> Result<PathBuf>;
+    /// Delete one staged source once it has been placed.
+    fn discard(&self, staged: &Path);
+    /// Remove the staging area after a clean run.
+    fn finish(self: Box<Self>) -> Result<()>;
+    /// Keep the staging area (after a failure) and hand back its path.
+    fn keep(self: Box<Self>) -> PathBuf;
+}
+
+/// [`Staging`] driven by a connected Kopia repository.
+pub struct KopiaStager<'a> {
+    staging: Staging,
+    repo: &'a Repository<'a>,
+}
+
+impl<'a> KopiaStager<'a> {
+    pub fn create(paths: &MossPaths, run_id: &str, repo: &'a Repository<'a>) -> Result<Self> {
+        Ok(KopiaStager {
+            staging: Staging::create(paths, run_id)?,
+            repo,
+        })
+    }
+}
+
+impl Stager for KopiaStager<'_> {
+    fn fetch_manifest(&self, run: &Run) -> Result<Manifest> {
+        self.staging.fetch_manifest(self.repo, run)
+    }
+
+    fn stage_source(&self, source: &ManifestSource, skip_owners: bool) -> Result<PathBuf> {
+        self.staging.stage_source(self.repo, source, skip_owners)
+    }
+
+    fn discard(&self, staged: &Path) {
+        self.staging.discard(staged);
+    }
+
+    fn finish(self: Box<Self>) -> Result<()> {
+        self.staging.finish()
+    }
+
+    fn keep(self: Box<Self>) -> PathBuf {
+        self.staging.keep()
+    }
+}
+
 /// The staging area for one run: `<state>/staging/<run id>`.
 pub struct Staging {
     root: PathBuf,

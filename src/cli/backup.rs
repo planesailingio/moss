@@ -2,7 +2,7 @@
 
 use clap::Args;
 
-use crate::backup::run;
+use crate::backup::{gate, run};
 use crate::cli::AppContext;
 use crate::error::{ExitCode, MossError, Result};
 use crate::lock::Lock;
@@ -75,50 +75,22 @@ pub fn run(ctx: &AppContext, args: BackupArgs) -> Result<ExitCode> {
         },
     )?;
 
-    // Sensitive-data gate (spec §14).
-    let sensitive_files: u64 = result.sensitive.values().sum();
-    if sensitive_files > 0 {
-        if !config.safety.allow_sensitive {
-            return Err(MossError::SensitiveRefusal(format!(
-                "This profile contains {sensitive_files} sensitive credential files and safety.allow_sensitive is false."
-            )));
-        }
-        if config.safety.warn_on_sensitive && !ctx.global.dry_run && !args.yes {
-            console.line(format!(
-                "\nThis profile contains sensitive credentials ({}).\n\nRepository encryption is enabled.\n",
-                result.sensitive.iter().map(|(k, v)| format!("{} {}", k.display_name(), v)).collect::<Vec<_>>().join(", ")
-            ));
-            if console.can_prompt() {
-                if !confirm(&console, "Continue?", false)? {
-                    return Err(MossError::SensitiveRefusal(
-                        "Backup cancelled by user.".into(),
-                    ));
-                }
-            } else if !ctx.global.non_interactive {
-                return Err(MossError::InteractionRequired(
-                    "Sensitive data requires confirmation (or --yes).".into(),
-                ));
-            }
-            // Under --non-interactive with allow_sensitive=true, proceed: the
-            // configuration is the standing consent (spec §14).
-        }
+    // Sensitive-data gate (spec §14), then guardrails (spec §10).
+    let flags = gate::Flags {
+        yes: args.yes,
+        non_interactive: ctx.global.non_interactive,
+        dry_run: ctx.global.dry_run,
+        can_prompt: console.can_prompt(),
+    };
+    if let Some(code) = settle(&console, gate::sensitive_gate(config, &result, flags))? {
+        return Ok(code);
     }
-
-    // Guardrails (spec §10).
     let warnings = scan::guardrails(&result, config);
-    if !warnings.is_empty() {
-        for w in &warnings {
-            console.warn(format!("{} guardrail: {}", console.warn_mark(), w.message));
-        }
-        if ctx.global.non_interactive && !args.yes {
-            return Err(MossError::InteractionRequired(
-                "A guardrail threshold was exceeded. Raise the limit in config or pass --yes."
-                    .into(),
-            ));
-        }
-        if !args.yes && !ctx.global.dry_run && !confirm(&console, "Continue anyway?", false)? {
-            return Ok(ExitCode::General);
-        }
+    for w in &warnings {
+        console.warn(format!("{} guardrail: {}", console.warn_mark(), w.message));
+    }
+    if let Some(code) = settle(&console, gate::guardrail_gate(&warnings, flags))? {
+        return Ok(code);
     }
 
     let run_id = crate::backup::tags::new_run_id();
@@ -234,5 +206,30 @@ pub fn run(ctx: &AppContext, args: BackupArgs) -> Result<ExitCode> {
             outcome.skipped.len()
         ));
         Ok(ExitCode::PartialSuccess)
+    }
+}
+
+/// Act on a gate decision: `Ok(None)` means carry on, `Ok(Some(code))` ends
+/// the command with that code.
+fn settle(console: &crate::output::Console, gate: gate::Gate) -> Result<Option<ExitCode>> {
+    match gate {
+        gate::Gate::Proceed => Ok(None),
+        gate::Gate::Refuse(e) => Err(e),
+        gate::Gate::Confirm {
+            preamble,
+            question,
+            on_decline,
+        } => {
+            if let Some(text) = preamble {
+                console.line(text);
+            }
+            if confirm(console, question, false)? {
+                return Ok(None);
+            }
+            match on_decline {
+                gate::Decline::Refuse(e) => Err(e),
+                gate::Decline::Cancel => Ok(Some(ExitCode::General)),
+            }
+        }
     }
 }

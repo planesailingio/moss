@@ -4,10 +4,12 @@
 
 use serde::Serialize;
 
+use crate::backup::manifest::ManifestSource;
 use crate::error::ExitCode;
 use crate::model::ProfileCategory;
 use crate::output::{Console, human};
 use crate::platform::Platform;
+use crate::restore::place::Outcome;
 use crate::restore::translate::Finding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -78,6 +80,80 @@ pub struct SourceReport {
     pub size: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+}
+
+impl SourceReport {
+    fn base(source: &ManifestSource, destination: impl Into<String>) -> SourceReport {
+        SourceReport {
+            id: source.id.to_string(),
+            category: source.category,
+            destination: destination.into(),
+            status: SourceStatus::Skipped,
+            placed: 0,
+            skipped: 0,
+            conflicts: ConflictCounts::default(),
+            size: source.size,
+            reason: None,
+        }
+    }
+
+    /// Nothing placed, for a reported reason.
+    pub fn skipped(
+        source: &ManifestSource,
+        destination: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> SourceReport {
+        SourceReport {
+            reason: Some(reason.into()),
+            ..SourceReport::base(source, destination)
+        }
+    }
+
+    /// Blocked or errored before anything was placed.
+    pub fn failed(
+        source: &ManifestSource,
+        destination: impl Into<String>,
+        reason: impl Into<String>,
+    ) -> SourceReport {
+        SourceReport {
+            status: SourceStatus::Failed,
+            reason: Some(reason.into()),
+            ..SourceReport::base(source, destination)
+        }
+    }
+
+    /// A dry-run entry: what would be placed.
+    pub fn planned(
+        source: &ManifestSource,
+        destination: impl Into<String>,
+        note: Option<String>,
+    ) -> SourceReport {
+        SourceReport {
+            status: SourceStatus::Planned,
+            placed: source.files,
+            reason: note,
+            ..SourceReport::base(source, destination)
+        }
+    }
+
+    /// The result of placing a staged source.
+    pub fn from_outcome(
+        source: &ManifestSource,
+        destination: impl Into<String>,
+        outcome: &Outcome,
+    ) -> SourceReport {
+        SourceReport {
+            status: if outcome.skipped.is_empty() {
+                SourceStatus::Restored
+            } else {
+                SourceStatus::Partial
+            },
+            placed: outcome.placed,
+            skipped: outcome.skipped.len() as u64,
+            conflicts: outcome.conflicts.clone(),
+            ..SourceReport::base(source, destination)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

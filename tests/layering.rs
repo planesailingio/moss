@@ -29,7 +29,7 @@ const ALLOWED: &[(&str, &[&str])] = &[
     (
         "restore",
         &[
-            "backup", "config", "error", "model", "output", "platform", "scan",
+            "backup", "config", "error", "model", "output", "platform", "profile", "scan",
         ],
     ),
     ("lock", &["config", "error"]),
