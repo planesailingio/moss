@@ -32,10 +32,7 @@ zeroize = "1"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 ulid = "1"
 
-[target.'cfg(target_os = "macos")'.dependencies]
-libc = "0.2"
-
-[target.'cfg(target_os = "linux")'.dependencies]
+[target.'cfg(unix)'.dependencies]
 rustix = { version = "1", features = ["fs", "process"] }
 libc = "0.2"
 

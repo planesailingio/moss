@@ -8,24 +8,30 @@
 //! contract. The final component is then acted on
 //! with `O_NOFOLLOW` / `AT_SYMLINK_NOFOLLOW` so a symlink there is never
 //! followed. Nothing re-resolves a path string after that.
+//!
+//! Every call goes through `rustix`, which owns the descriptors (`OwnedFd`)
+//! and reports typed `Errno`s, so this module has no `unsafe` and never reads
+//! `errno` by hand. Components have already been validated by
+//! `super::validate_rel` (no NUL, no `..`), so they are passed as `&OsStr`.
 
-use std::ffi::{CStr, CString, OsStr, OsString};
+#[cfg(target_os = "linux")]
+use std::ffi::CString;
+use std::ffi::{OsStr, OsString};
 use std::fs::File;
 use std::io;
-use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
+#[cfg(target_os = "linux")]
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use rustix::fs::{AtFlags, FileType, Mode, OFlags, RawMode, Stat};
+use rustix::io::Errno;
 
 use super::{EntryKind, Metadata, refused};
 
 pub struct RootInner {
     fd: OwnedFd,
-}
-
-pub fn cstr(s: &OsStr) -> io::Result<CString> {
-    CString::new(s.as_bytes())
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "path contains a NUL byte"))
 }
 
 /// Join validated components with `/` for a single `openat2` call.
@@ -44,42 +50,40 @@ pub fn join_comps(comps: &[OsString]) -> io::Result<CString> {
 
 /// Translate the errno a containment primitive uses for "this would leave the
 /// root" into a typed refusal.
-pub fn map_escape(e: io::Error, full: &Path, reason: &str) -> io::Error {
-    match e.raw_os_error() {
-        Some(libc::ELOOP) | Some(libc::EMLINK) => refused(full, reason),
-        _ => e,
+pub fn map_escape(e: Errno, full: &Path, reason: &str) -> io::Error {
+    match e {
+        Errno::LOOP | Errno::MLINK => refused(full, reason),
+        _ => e.into(),
     }
 }
 
-fn last_error() -> io::Error {
-    io::Error::last_os_error()
+/// Permission bits (`0o7777` at most) as a `Mode`; the file-type bits are
+/// masked off. `RawMode` is `u16` on macOS and `u32` on Linux.
+fn mode_bits(mode: u32) -> Mode {
+    Mode::from_raw_mode(mode as RawMode)
 }
 
 /// Open one directory component beneath `dir`, never following a symlink.
-pub fn open_component(dir: BorrowedFd<'_>, name: &CStr, full: &Path) -> io::Result<OwnedFd> {
-    // SAFETY: `name` is a valid C string and `dir` an open descriptor.
-    let fd = unsafe {
-        libc::openat(
-            dir.as_raw_fd(),
-            name.as_ptr(),
-            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        let e = last_error();
-        // Linux reports a symlink under O_NOFOLLOW | O_DIRECTORY as ELOOP;
-        // macOS reports ENOTDIR. ENOTDIR is also what a plain file gives, so
-        // look (without following) before calling it a refusal. Nothing has
-        // been acted on at this point, so the extra lstat is not a race.
-        if e.raw_os_error() == Some(libc::ENOTDIR)
-            && lstat_at(dir, name)?.is_some_and(|m| m.is_symlink())
-        {
-            return Err(refused(full, "a path component is a symbolic link"));
+pub fn open_component(dir: BorrowedFd<'_>, name: &OsStr, full: &Path) -> io::Result<OwnedFd> {
+    match rustix::fs::openat(
+        dir,
+        name,
+        OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        Mode::empty(),
+    ) {
+        Ok(fd) => Ok(fd),
+        Err(e) => {
+            // Linux reports a symlink under O_NOFOLLOW | O_DIRECTORY as ELOOP;
+            // macOS reports ENOTDIR. ENOTDIR is also what a plain file gives,
+            // so look (without following) before calling it a refusal.
+            // Nothing has been acted on at this point, so the extra lstat is
+            // not a race.
+            if e == Errno::NOTDIR && lstat_at(dir, name)?.is_some_and(|m| m.is_symlink()) {
+                return Err(refused(full, "a path component is a symbolic link"));
+            }
+            Err(map_escape(e, full, "a path component is a symbolic link"))
         }
-        return Err(map_escape(e, full, "a path component is a symbolic link"));
     }
-    // SAFETY: fd is a freshly opened descriptor we own.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 /// The generic component-by-component walk. Rejects any symlinked component
@@ -88,7 +92,7 @@ pub fn open_component(dir: BorrowedFd<'_>, name: &CStr, full: &Path) -> io::Resu
 pub fn walk(root: BorrowedFd<'_>, comps: &[OsString], full: &Path) -> io::Result<OwnedFd> {
     let mut cur = root.try_clone_to_owned()?;
     for c in comps {
-        cur = open_component(cur.as_fd(), &cstr(c)?, full)?;
+        cur = open_component(cur.as_fd(), c, full)?;
     }
     Ok(cur)
 }
@@ -112,89 +116,62 @@ pub fn open_dir_beneath(
     walk(root, comps, full)
 }
 
-fn split_last<'a>(comps: &'a [OsString], full: &Path) -> io::Result<(&'a [OsString], CString)> {
+fn split_last<'a>(comps: &'a [OsString], full: &Path) -> io::Result<(&'a [OsString], &'a OsStr)> {
     match comps.split_last() {
-        Some((name, parents)) => Ok((parents, cstr(name)?)),
+        Some((name, parents)) => Ok((parents, name)),
         None => Err(refused(full, "the destination root itself is not a target")),
     }
 }
 
+/// Open the final component with `O_NOFOLLOW`, so a symlink there is refused
+/// rather than followed.
 fn open_at(
     parent: BorrowedFd<'_>,
-    name: &CStr,
-    flags: libc::c_int,
-    mode: u32,
+    name: &OsStr,
+    flags: OFlags,
+    mode: Mode,
     full: &Path,
 ) -> io::Result<File> {
-    // SAFETY: valid descriptor and C string; mode is a plain integer.
-    let fd = unsafe {
-        libc::openat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            flags | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            mode as libc::c_uint,
-        )
-    };
-    if fd < 0 {
-        return Err(map_escape(
-            last_error(),
-            full,
-            "the destination is a symbolic link",
-        ));
-    }
-    // SAFETY: freshly opened descriptor.
-    Ok(unsafe { File::from_raw_fd(fd) })
+    rustix::fs::openat(
+        parent,
+        name,
+        flags | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+        mode,
+    )
+    .map(File::from)
+    .map_err(|e| map_escape(e, full, "the destination is a symbolic link"))
 }
 
 pub fn fchmod(file: &File, mode: u32) -> io::Result<()> {
-    // SAFETY: plain fchmod on an open descriptor.
-    if unsafe { libc::fchmod(file.as_raw_fd(), mode as libc::mode_t) } < 0 {
-        return Err(last_error());
-    }
-    Ok(())
+    Ok(rustix::fs::fchmod(file, mode_bits(mode))?)
 }
 
-fn lstat_at(parent: BorrowedFd<'_>, name: &CStr) -> io::Result<Option<Metadata>> {
-    // SAFETY: stat is plain-old-data; fstatat fills it in on success.
-    let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    let rc = unsafe {
-        libc::fstatat(
-            parent.as_raw_fd(),
-            name.as_ptr(),
-            &mut st,
-            libc::AT_SYMLINK_NOFOLLOW,
-        )
-    };
-    if rc < 0 {
-        let e = last_error();
-        return if e.kind() == io::ErrorKind::NotFound {
-            Ok(None)
-        } else {
-            Err(e)
-        };
+fn lstat_at(parent: BorrowedFd<'_>, name: &OsStr) -> io::Result<Option<Metadata>> {
+    match rustix::fs::statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(st) => Ok(Some(metadata_from_stat(&st))),
+        Err(Errno::NOENT) => Ok(None),
+        Err(e) => Err(e.into()),
     }
-    Ok(Some(metadata_from_stat(&st)))
 }
 
-pub fn metadata_from_stat(st: &libc::stat) -> Metadata {
-    // `mode_t` is u16 on macOS and u32 on Linux, so the casts are needed on
-    // one platform and flagged as redundant on the other.
+pub fn metadata_from_stat(st: &Stat) -> Metadata {
+    // `rustix::fs::Stat` mirrors the platform's own struct, so these fields
+    // differ in width and signedness between macOS and Linux (`st_mode` is
+    // u16 vs u32, `st_mtime_nsec` is i64 vs u64); each cast is needed on one
+    // platform and flagged as redundant on the other.
     #[allow(clippy::unnecessary_cast)]
-    let (mode, fmt, reg, dir, lnk) = (
+    let (mode, secs, nanos, len) = (
         st.st_mode as u32,
-        libc::S_IFMT as u32,
-        libc::S_IFREG as u32,
-        libc::S_IFDIR as u32,
-        libc::S_IFLNK as u32,
+        st.st_mtime as i64,
+        st.st_mtime_nsec as u32,
+        st.st_size as u64,
     );
-    let kind = match mode & fmt {
-        m if m == reg => EntryKind::File,
-        m if m == dir => EntryKind::Dir,
-        m if m == lnk => EntryKind::Symlink,
+    let kind = match FileType::from_raw_mode(st.st_mode as RawMode) {
+        FileType::RegularFile => EntryKind::File,
+        FileType::Directory => EntryKind::Dir,
+        FileType::Symlink => EntryKind::Symlink,
         _ => EntryKind::Other,
     };
-    let secs = st.st_mtime;
-    let nanos = st.st_mtime_nsec as u32;
     let modified = if secs >= 0 {
         UNIX_EPOCH.checked_add(Duration::new(secs as u64, nanos))
     } else {
@@ -202,7 +179,7 @@ pub fn metadata_from_stat(st: &libc::stat) -> Metadata {
     };
     Metadata {
         kind,
-        len: st.st_size as u64,
+        len,
         mode: mode & 0o7777,
         modified,
     }
@@ -210,24 +187,15 @@ pub fn metadata_from_stat(st: &libc::stat) -> Metadata {
 
 impl RootInner {
     pub fn open(path: &Path) -> io::Result<RootInner> {
-        let c = cstr(path.as_os_str())?;
-        // SAFETY: valid C string; flags are constants.
-        let fd = unsafe {
-            libc::open(
-                c.as_ptr(),
-                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
-            )
-        };
-        if fd < 0 {
-            return Err(last_error());
-        }
-        // SAFETY: freshly opened descriptor.
-        Ok(RootInner {
-            fd: unsafe { OwnedFd::from_raw_fd(fd) },
-        })
+        let fd = rustix::fs::open(
+            path,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC,
+            Mode::empty(),
+        )?;
+        Ok(RootInner { fd })
     }
 
-    fn parent(&self, comps: &[OsString], full: &Path) -> io::Result<(OwnedFd, CString)> {
+    fn parent<'a>(&self, comps: &'a [OsString], full: &Path) -> io::Result<(OwnedFd, &'a OsStr)> {
         let (parents, name) = split_last(comps, full)?;
         let dir = open_dir_beneath(self.fd.as_fd(), parents, full)?;
         Ok((dir, name))
@@ -241,16 +209,11 @@ impl RootInner {
     ) -> io::Result<()> {
         for depth in 1..=comps.len() {
             let parents = &comps[..depth - 1];
-            let name = cstr(&comps[depth - 1])?;
+            let name = comps[depth - 1].as_os_str();
             let dir = open_dir_beneath(self.fd.as_fd(), parents, full)?;
-            // SAFETY: valid descriptor and C string.
-            let rc = unsafe { libc::mkdirat(dir.as_raw_fd(), name.as_ptr(), 0o700) };
-            if rc < 0 {
-                let e = last_error();
-                if e.kind() != io::ErrorKind::AlreadyExists {
-                    return Err(e);
-                }
-                match lstat_at(dir.as_fd(), &name)? {
+            match rustix::fs::mkdirat(&dir, name, Mode::RWXU) {
+                Ok(()) => {}
+                Err(Errno::EXIST) => match lstat_at(dir.as_fd(), name)? {
                     Some(m) if m.is_dir() => {}
                     Some(m) if m.is_symlink() => {
                         if depth == comps.len() {
@@ -271,7 +234,8 @@ impl RootInner {
                             format!("{} vanished while creating it", full.display()),
                         ));
                     }
-                }
+                },
+                Err(e) => return Err(e.into()),
             }
         }
         if let Some(mode) = mode
@@ -292,9 +256,9 @@ impl RootInner {
         let create_mode = mode.unwrap_or(0o600);
         let file = open_at(
             dir.as_fd(),
-            &name,
-            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC,
-            create_mode,
+            name,
+            OFlags::WRONLY | OFlags::CREATE | OFlags::TRUNC,
+            mode_bits(create_mode),
             full,
         )?;
         if let Some(mode) = mode {
@@ -305,17 +269,12 @@ impl RootInner {
 
     pub fn open_for_read(&self, comps: &[OsString], full: &Path) -> io::Result<File> {
         let (dir, name) = self.parent(comps, full)?;
-        open_at(dir.as_fd(), &name, libc::O_RDONLY, 0, full)
+        open_at(dir.as_fd(), name, OFlags::RDONLY, Mode::empty(), full)
     }
 
     pub fn symlink(&self, comps: &[OsString], target: &Path, full: &Path) -> io::Result<()> {
         let (dir, name) = self.parent(comps, full)?;
-        let target = cstr(target.as_os_str())?;
-        // SAFETY: valid C strings and descriptor.
-        if unsafe { libc::symlinkat(target.as_ptr(), dir.as_raw_fd(), name.as_ptr()) } < 0 {
-            return Err(last_error());
-        }
-        Ok(())
+        Ok(rustix::fs::symlinkat(target, &dir, name)?)
     }
 
     pub fn exists(&self, comps: &[OsString], full: &Path) -> io::Result<Option<Metadata>> {
@@ -327,7 +286,7 @@ impl RootInner {
             Err(e) if e.kind() == io::ErrorKind::NotADirectory => return Ok(None),
             Err(e) => return Err(e),
         };
-        lstat_at(dir.as_fd(), &name)
+        lstat_at(dir.as_fd(), name)
     }
 
     pub fn rename(
@@ -339,28 +298,15 @@ impl RootInner {
     ) -> io::Result<()> {
         let (from_dir, from_name) = self.parent(from, from_full)?;
         let (to_dir, to_name) = self.parent(to, to_full)?;
-        // SAFETY: valid descriptors and C strings.
-        let rc = unsafe {
-            libc::renameat(
-                from_dir.as_raw_fd(),
-                from_name.as_ptr(),
-                to_dir.as_raw_fd(),
-                to_name.as_ptr(),
-            )
-        };
-        if rc < 0 {
-            return Err(last_error());
-        }
-        Ok(())
+        Ok(rustix::fs::renameat(
+            &from_dir, from_name, &to_dir, to_name,
+        )?)
     }
 
     pub fn remove_file(&self, comps: &[OsString], full: &Path) -> io::Result<()> {
         let (dir, name) = self.parent(comps, full)?;
-        // SAFETY: valid descriptor and C string; flags 0 = unlink, not rmdir.
-        if unsafe { libc::unlinkat(dir.as_raw_fd(), name.as_ptr(), 0) } < 0 {
-            return Err(last_error());
-        }
-        Ok(())
+        // No `AT_REMOVEDIR`: this is unlink, never rmdir.
+        Ok(rustix::fs::unlinkat(&dir, name, AtFlags::empty())?)
     }
 
     pub fn set_mode(&self, comps: &[OsString], mode: u32, full: &Path) -> io::Result<()> {
@@ -368,39 +314,29 @@ impl RootInner {
         // The chmod below never follows a link, so this is a courtesy check
         // rather than a containment decision: chmod on a link's own bits is
         // pointless and callers want to know.
-        if lstat_at(dir.as_fd(), &name)?.is_some_and(|m| m.is_symlink()) {
+        if lstat_at(dir.as_fd(), name)?.is_some_and(|m| m.is_symlink()) {
             return Err(refused(full, "the destination is a symbolic link"));
         }
-        // SAFETY: valid descriptor and C string.
-        let rc = unsafe {
-            libc::fchmodat(
-                dir.as_raw_fd(),
-                name.as_ptr(),
-                mode as libc::mode_t,
-                libc::AT_SYMLINK_NOFOLLOW,
-            )
-        };
-        if rc == 0 {
-            return Ok(());
-        }
-        let e = last_error();
-        match e.raw_os_error() {
-            // Older glibc cannot chmod without following; open the entry
-            // itself with O_NOFOLLOW (refusing a symlink) and fchmod the fd.
-            Some(code) if code == libc::ENOTSUP || code == libc::EOPNOTSUPP => {
-                let file = match open_at(dir.as_fd(), &name, libc::O_RDONLY, 0, full) {
+        match rustix::fs::chmodat(&dir, name, mode_bits(mode), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(()) => Ok(()),
+            // Linux's fchmodat(2) has no flags argument, so rustix reports
+            // AT_SYMLINK_NOFOLLOW there as unsupported (as older glibc does):
+            // open the entry itself with O_NOFOLLOW (refusing a symlink) and
+            // fchmod the descriptor instead.
+            Err(e) if e == Errno::NOTSUP || e == Errno::OPNOTSUPP => {
+                let file = match open_at(dir.as_fd(), name, OFlags::RDONLY, Mode::empty(), full) {
                     Ok(f) => f,
                     Err(e)
                         if e.kind() == io::ErrorKind::PermissionDenied
                             && !super::is_containment_error(&e) =>
                     {
-                        open_at(dir.as_fd(), &name, libc::O_WRONLY, 0, full)?
+                        open_at(dir.as_fd(), name, OFlags::WRONLY, Mode::empty(), full)?
                     }
                     Err(e) => return Err(e),
                 };
                 fchmod(&file, mode)
             }
-            _ => Err(map_escape(e, full, "the destination is a symbolic link")),
+            Err(e) => Err(map_escape(e, full, "the destination is a symbolic link")),
         }
     }
 
