@@ -72,9 +72,12 @@ moss restore [latest | <run-id prefix>] [--from-host H] [--category C] [--source
 ```
 
 Placement opens the destination through a containment primitive and writes to the resulting
-descriptor or handle. No path string is re-resolved after validation (§16 TOCTOU). Symlinks in
-staging are recreated as symlinks, never followed. Staging is on the same volume as the home
-directory so placement can `rename`.
+descriptor or handle. No path string is re-resolved after validation (§16 TOCTOU); on Windows the
+walk, rename and delete are all `NtCreateFile`/`NtSetInformationFile` calls relative to the verified
+parent handle, and the one path-based operation Win32 forces — symlink creation — is re-verified
+through that handle immediately afterwards (`restore/contain/windows.rs`). Symlinks in staging are
+recreated as symlinks, never followed. Staging is on the same volume as the home directory so
+placement can `rename`.
 
 ## One moss run = N Kopia snapshots + 1 manifest snapshot
 

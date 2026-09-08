@@ -523,14 +523,13 @@ pub fn check_collisions(
     check
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::config::ConflictPolicy;
     use crate::model::ProfileCategory;
     use crate::restore::journal;
     use crate::restore::test_support::{sample_manifest, source};
-    use std::os::unix::fs::PermissionsExt;
 
     struct Fx {
         tmp: tempfile::TempDir,
@@ -539,36 +538,70 @@ mod tests {
         journal_path: PathBuf,
     }
 
-    fn fixture() -> Fx {
+    /// Unix mode bits: applied on Unix, a no-op on Windows (spec §12).
+    fn set_mode(p: &Path, mode: u32) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(p, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        #[cfg(not(unix))]
+        let _ = (p, mode);
+    }
+
+    fn symlink_file_any(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_file(target, link);
+    }
+
+    fn symlink_dir_any(target: &Path, link: &Path) -> io::Result<()> {
+        #[cfg(unix)]
+        return std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        return std::os::windows::fs::symlink_dir(target, link);
+    }
+
+    /// An absolute symlink target outside any home, in the host's own form.
+    fn abs_link_target() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from("C:\\Users\\other\\.ssh\\config")
+        } else {
+            PathBuf::from("/Users/other/.ssh/config")
+        }
+    }
+
+    /// `None` when the host cannot create symlinks (Windows without Developer
+    /// Mode or elevation, spec §17); every test here places one.
+    fn fixture() -> Option<Fx> {
         let tmp = tempfile::tempdir().unwrap();
         let home = tmp.path().join("home");
         std::fs::create_dir_all(&home).unwrap();
         let staged = tmp.path().join("staging/ssh");
         std::fs::create_dir_all(staged.join("sub")).unwrap();
         std::fs::write(staged.join("id_ed25519"), b"KEY").unwrap();
-        std::fs::set_permissions(
-            staged.join("id_ed25519"),
-            std::fs::Permissions::from_mode(0o600),
-        )
-        .unwrap();
+        set_mode(&staged.join("id_ed25519"), 0o600);
         std::fs::write(staged.join("config"), b"Host x\n").unwrap();
-        std::fs::set_permissions(
-            staged.join("config"),
-            std::fs::Permissions::from_mode(0o644),
-        )
-        .unwrap();
+        set_mode(&staged.join("config"), 0o644);
         std::fs::write(staged.join("sub/inner"), b"inner").unwrap();
-        std::fs::set_permissions(staged.join("sub"), std::fs::Permissions::from_mode(0o500))
-            .unwrap();
-        std::fs::set_permissions(&staged, std::fs::Permissions::from_mode(0o700)).unwrap();
-        std::os::unix::fs::symlink("config", staged.join("rel_link")).unwrap();
-        std::os::unix::fs::symlink("/Users/other/.ssh/config", staged.join("abs_link")).unwrap();
-        Fx {
+        set_mode(&staged.join("sub"), 0o500);
+        set_mode(&staged, 0o700);
+        match symlink_file_any(Path::new("config"), &staged.join("rel_link")) {
+            Ok(()) => {}
+            Err(e) if contain::is_privilege_error(&e) => {
+                eprintln!("skipping: this host cannot create symlinks ({e})");
+                return None;
+            }
+            Err(e) => panic!("symlink: {e}"),
+        }
+        symlink_file_any(&abs_link_target(), &staged.join("abs_link")).unwrap();
+        Some(Fx {
             journal_path: tmp.path().join("journal"),
             tmp,
             home,
             staged,
-        }
+        })
     }
 
     fn run(
@@ -596,13 +629,15 @@ mod tests {
         place_source(&root, &fx.staged, Path::new(".ssh"), &mut ctx).unwrap()
     }
 
+    #[cfg(unix)]
     fn mode(p: &Path) -> u32 {
+        use std::os::unix::fs::PermissionsExt;
         std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o777
     }
 
     #[test]
     fn places_tree_with_exact_modes_and_symlink_policy() {
-        let fx = fixture();
+        let Some(fx) = fixture() else { return };
         // Cross-OS: the absolute link outside this home is skipped. Pick a
         // source OS that differs from the host so the check fires everywhere.
         let other_os = if Platform::current() == Platform::Linux {
@@ -616,10 +651,13 @@ mod tests {
         assert!(out.skipped[0].reason.contains("symlink not supported here"));
         assert_eq!(out.skipped[0].path, "~/.ssh/abs_link");
         let ssh = fx.home.join(".ssh");
-        assert_eq!(mode(&ssh), 0o700);
-        assert_eq!(mode(&ssh.join("id_ed25519")), 0o600);
-        assert_eq!(mode(&ssh.join("config")), 0o644);
-        assert_eq!(mode(&ssh.join("sub")), 0o500);
+        #[cfg(unix)]
+        {
+            assert_eq!(mode(&ssh), 0o700);
+            assert_eq!(mode(&ssh.join("id_ed25519")), 0o600);
+            assert_eq!(mode(&ssh.join("config")), 0o644);
+            assert_eq!(mode(&ssh.join("sub")), 0o500);
+        }
         assert_eq!(std::fs::read(ssh.join("sub/inner")).unwrap(), b"inner");
         assert_eq!(
             std::fs::read_link(ssh.join("rel_link")).unwrap(),
@@ -638,7 +676,7 @@ mod tests {
             4
         );
         // Same OS: the absolute link is recreated verbatim.
-        std::fs::set_permissions(ssh.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        set_mode(&ssh.join("sub"), 0o700);
         std::fs::remove_dir_all(&ssh).unwrap();
         let out = run(
             &fx,
@@ -650,14 +688,14 @@ mod tests {
         assert_eq!(out.placed, 5);
         assert_eq!(
             std::fs::read_link(ssh.join("abs_link")).unwrap(),
-            PathBuf::from("/Users/other/.ssh/config")
+            abs_link_target()
         );
-        std::fs::set_permissions(ssh.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        set_mode(&ssh.join("sub"), 0o700);
     }
 
     #[test]
     fn conflict_policies() {
-        let fx = fixture();
+        let Some(fx) = fixture() else { return };
         let ssh = fx.home.join(".ssh");
         std::fs::create_dir_all(&ssh).unwrap();
         std::fs::write(ssh.join("config"), b"mine").unwrap();
@@ -674,7 +712,7 @@ mod tests {
         assert!(out.skipped.iter().any(|s| s.path == "~/.ssh/config"));
         // Backup moves it aside. Start from a directory holding only the
         // conflicting file, since the Skip run above placed the rest.
-        std::fs::set_permissions(ssh.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        set_mode(&ssh.join("sub"), 0o700);
         std::fs::remove_dir_all(&ssh).unwrap();
         std::fs::create_dir_all(&ssh).unwrap();
         std::fs::write(ssh.join("config"), b"mine").unwrap();
@@ -702,7 +740,7 @@ mod tests {
         std::fs::remove_file(ssh.join("config")).unwrap();
         let outside = fx.tmp.path().join("outside");
         std::fs::write(&outside, b"victim").unwrap();
-        std::os::unix::fs::symlink(&outside, ssh.join("config")).unwrap();
+        symlink_file_any(&outside, &ssh.join("config")).unwrap();
         let out = run(
             &fx,
             ConflictPolicy::Overwrite,
@@ -722,7 +760,7 @@ mod tests {
             "symlink target untouched"
         );
         // Interactive without a terminal is exit 13.
-        std::fs::set_permissions(ssh.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        set_mode(&ssh.join("sub"), 0o700);
         let root = Root::open(&fx.home).unwrap();
         let console = crate::output::Console::for_tests();
         let mut resolver = Resolver::new(ConflictPolicy::Interactive, &console);
@@ -746,7 +784,7 @@ mod tests {
 
     #[test]
     fn resume_skips_done_and_overwrites_pending() {
-        let fx = fixture();
+        let Some(fx) = fixture() else { return };
         let ssh = fx.home.join(".ssh");
         std::fs::create_dir_all(&ssh).unwrap();
         std::fs::write(ssh.join("config"), b"done-earlier").unwrap();
@@ -764,15 +802,15 @@ mod tests {
         assert_eq!(std::fs::read(ssh.join("config")).unwrap(), b"done-earlier");
         assert_eq!(std::fs::read(ssh.join("id_ed25519")).unwrap(), b"KEY");
         assert_eq!(out.conflicts.skipped, 0);
-        std::fs::set_permissions(ssh.join("sub"), std::fs::Permissions::from_mode(0o700)).unwrap();
+        set_mode(&ssh.join("sub"), 0o700);
     }
 
     #[test]
     fn pre_existing_destination_symlink_is_refused() {
-        let fx = fixture();
+        let Some(fx) = fixture() else { return };
         let outside = fx.tmp.path().join("elsewhere");
         std::fs::create_dir_all(&outside).unwrap();
-        std::os::unix::fs::symlink(&outside, fx.home.join(".ssh")).unwrap();
+        symlink_dir_any(&outside, &fx.home.join(".ssh")).unwrap();
         let out = run(
             &fx,
             ConflictPolicy::Overwrite,
@@ -792,7 +830,7 @@ mod tests {
 
     #[test]
     fn collision_renames_apply_during_placement() {
-        let fx = fixture();
+        let Some(fx) = fixture() else { return };
         std::fs::write(fx.staged.join("Makefile"), b"A").unwrap();
         let mut m = sample_manifest();
         m.collisions.push(Collision::Case {
@@ -830,11 +868,7 @@ mod tests {
         assert!(fx.home.join(".ssh/Makefile.1").exists());
         assert_eq!(out.renamed.len(), 1);
         assert_eq!(out.renamed[0].to, "~/.ssh/Makefile.1");
-        std::fs::set_permissions(
-            fx.home.join(".ssh/sub"),
-            std::fs::Permissions::from_mode(0o700),
-        )
-        .unwrap();
+        set_mode(&fx.home.join(".ssh/sub"), 0o700);
         // A home-wide source matches everything.
         let home = source("user_home", ProfileCategory::PersonalData, "~");
         assert_eq!(

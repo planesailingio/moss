@@ -4,10 +4,13 @@
 //! so every write goes through a [`Root`]: a directory handle opened once, with
 //! each relative path validated *and opened in one operation* by the platform's
 //! real containment primitive — `openat2(RESOLVE_IN_ROOT | RESOLVE_NO_SYMLINKS)`
-//! on Linux, a component-wise `O_NOFOLLOW` walk on other Unixes, handle-relative
-//! opens on Windows. Every implementation refuses a symlink at *any* component.
-//! The descriptor or handle that comes back is what gets written; no path
-//! string is re-resolved afterwards (TOCTOU, spec §16).
+//! on Linux, a component-wise `O_NOFOLLOW` walk on other Unixes, a
+//! handle-relative `NtCreateFile` walk on Windows. Every implementation refuses
+//! a symlink (or junction) at *any* component. The descriptor or handle that
+//! comes back is what gets written; no path string is re-resolved afterwards
+//! (TOCTOU, spec §16). The single exception is Windows symlink *creation*,
+//! which Win32 offers only by path and which `windows.rs` re-verifies through
+//! the parent handle immediately afterwards.
 //!
 //! `O_NOFOLLOW` guards only the final component and is used for exactly that.
 
@@ -430,6 +433,320 @@ mod tests {
                 .create_dir_all(Path::new("inner/file/sub"), None)
                 .unwrap_err();
             assert!(!is_containment_error(&err));
+        }
+    }
+
+    #[cfg(windows)]
+    mod windows_tests {
+        use super::super::*;
+        use std::io::{Read, Write};
+        use std::process::Command;
+
+        struct Fixture {
+            _tmp: tempfile::TempDir,
+            root: PathBuf,
+            outside: PathBuf,
+            /// Directory symlinks could be created (needs Developer Mode or
+            /// elevation; GitHub's runners have it, a plain dev box may not).
+            dir_symlinks: bool,
+            /// File symlinks could be created (same privilege).
+            file_symlinks: bool,
+        }
+
+        /// root/
+        ///   junc      -> ../outside          (junction; needs no privilege)
+        ///   dlink     -> ../outside          (directory symlink)
+        ///   existing  -> ../outside/target   (file symlink at a final component)
+        ///   inner/    (a real directory)
+        /// outside/
+        ///   target    (a real file the links point at)
+        fn fixture() -> Fixture {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path().join("root");
+            let outside = tmp.path().join("outside");
+            std::fs::create_dir_all(&root).unwrap();
+            std::fs::create_dir_all(&outside).unwrap();
+            std::fs::create_dir_all(root.join("inner")).unwrap();
+            std::fs::write(outside.join("target"), b"victim").unwrap();
+            let status = Command::new("cmd")
+                .args(["/c", "mklink", "/J"])
+                .arg(root.join("junc"))
+                .arg(&outside)
+                .status()
+                .unwrap();
+            assert!(status.success(), "mklink /J failed: {status}");
+            let dir_symlinks = match std::os::windows::fs::symlink_dir(&outside, root.join("dlink"))
+            {
+                Ok(()) => true,
+                Err(e) if is_privilege_error(&e) => false,
+                Err(e) => panic!("symlink_dir: {e}"),
+            };
+            let file_symlinks = match std::os::windows::fs::symlink_file(
+                outside.join("target"),
+                root.join("existing"),
+            ) {
+                Ok(()) => true,
+                Err(e) if is_privilege_error(&e) => false,
+                Err(e) => panic!("symlink_file: {e}"),
+            };
+            Fixture {
+                _tmp: tmp,
+                root,
+                outside,
+                dir_symlinks,
+                file_symlinks,
+            }
+        }
+
+        fn assert_refused(result: io::Result<impl std::fmt::Debug>, what: &str) {
+            match result {
+                Ok(v) => panic!("{what}: expected refusal, got {v:?}"),
+                Err(e) => assert!(is_containment_error(&e), "{what}: unexpected error {e:?}"),
+            }
+        }
+
+        /// Every operation through a junction or directory symlink is refused
+        /// at that component, and nothing appears on the other side.
+        fn assert_link_refused(root: &Root, f: &Fixture, link: &str) {
+            let p = |s: &str| PathBuf::from(format!("{link}/{s}"));
+            assert_refused(root.open_for_write(&p("x"), None), "write through link");
+            assert_refused(root.create_dir_all(&p("sub"), None), "mkdir through link");
+            assert_refused(
+                root.create_dir_all(&p("sub/deeper"), None),
+                "mkdir -p through link",
+            );
+            assert_refused(root.open_for_read(&p("target")), "read through link");
+            assert_refused(root.exists(&p("target")), "exists through link");
+            assert_refused(root.remove_file(&p("target")), "remove through link");
+            assert_refused(root.set_mode(&p("target"), 0o600), "set_mode through link");
+            assert_refused(
+                root.set_dir_modified(Path::new(link), SystemTime::UNIX_EPOCH),
+                "set_dir_modified on link",
+            );
+            assert_refused(
+                root.rename_within(&p("target"), Path::new("inner/stolen")),
+                "rename out of link",
+            );
+            assert_refused(
+                root.rename_within(Path::new("inner/mine"), &p("planted")),
+                "rename into link",
+            );
+            // The link itself is a reparse point at the final component.
+            assert_refused(root.create_dir_all(Path::new(link), None), "mkdir on link");
+            assert_refused(root.open_for_write(Path::new(link), None), "write on link");
+            assert!(!f.outside.join("x").exists());
+            assert!(!f.outside.join("sub").exists());
+            assert!(!f.outside.join("planted").exists());
+            assert!(!f.root.join("inner/stolen").exists());
+            assert_eq!(std::fs::read(f.outside.join("target")).unwrap(), b"victim");
+        }
+
+        #[test]
+        fn escapes_are_refused() {
+            let f = fixture();
+            let root = Root::open(&f.root).unwrap();
+            root.open_for_write(Path::new("inner/mine"), None).unwrap();
+            assert_link_refused(&root, &f, "junc");
+            if f.dir_symlinks {
+                assert_link_refused(&root, &f, "dlink");
+            }
+            assert_refused(root.open_for_write(Path::new("../x"), None), "../x");
+            assert_refused(root.open_for_write(Path::new("C:\\x"), None), "C:\\x");
+            assert_refused(root.open_for_write(Path::new("\\x"), None), "\\x");
+            if f.file_symlinks {
+                // Writing through a pre-existing final-component symlink.
+                let err = root
+                    .open_for_write(Path::new("existing"), Some(0o600))
+                    .unwrap_err();
+                assert!(is_containment_error(&err), "{err:?}");
+                assert_eq!(std::fs::read(f.outside.join("target")).unwrap(), b"victim");
+                assert!(is_containment_error(
+                    &root
+                        .create_dir_all(Path::new("existing"), None)
+                        .unwrap_err()
+                ));
+                assert!(is_containment_error(
+                    &root
+                        .create_dir_all(Path::new("existing/sub"), None)
+                        .unwrap_err()
+                ));
+                assert!(is_containment_error(
+                    &root.open_for_read(Path::new("existing")).unwrap_err()
+                ));
+                assert!(is_containment_error(
+                    &root.set_mode(Path::new("existing"), 0o600).unwrap_err()
+                ));
+                assert_eq!(
+                    root.exists(Path::new("existing")).unwrap().unwrap().kind,
+                    EntryKind::Symlink
+                );
+            }
+            assert!(f.root.join("inner/mine").exists());
+        }
+
+        #[test]
+        fn contained_writes_work() {
+            let f = fixture();
+            let root = Root::open(&f.root).unwrap();
+            root.create_dir_all(Path::new("a/b"), Some(0o700)).unwrap();
+            let mut file = root
+                .open_for_write(Path::new("a/b/c.txt"), Some(0o600))
+                .unwrap();
+            file.write_all(b"hello").unwrap();
+            drop(file);
+            assert_eq!(std::fs::read(f.root.join("a/b/c.txt")).unwrap(), b"hello");
+            // Exists / metadata.
+            let meta = root.exists(Path::new("a/b/c.txt")).unwrap().unwrap();
+            assert_eq!(meta.kind, EntryKind::File);
+            assert_eq!(meta.len, 5);
+            assert!(meta.modified.is_some());
+            assert!(root.exists(Path::new("a/b/missing")).unwrap().is_none());
+            assert!(root.exists(Path::new("nope/at/all")).unwrap().is_none());
+            assert!(root.exists(Path::new("a/b/c.txt/under")).unwrap().is_none());
+            assert_eq!(
+                root.exists(Path::new("junc")).unwrap().unwrap().kind,
+                EntryKind::Symlink
+            );
+            if f.dir_symlinks {
+                assert_eq!(
+                    root.exists(Path::new("dlink")).unwrap().unwrap().kind,
+                    EntryKind::Symlink
+                );
+            }
+            assert!(root.exists(Path::new("a")).unwrap().unwrap().is_dir());
+            assert!(root.exists(Path::new("inner")).unwrap().unwrap().is_dir());
+            // Internal paths with `.` are fine; a rename stays inside.
+            root.rename_within(Path::new("a/b/c.txt"), Path::new("a/b/d.txt"))
+                .unwrap();
+            assert!(root.exists(Path::new("a/b/c.txt")).unwrap().is_none());
+            let mut text = String::new();
+            root.open_for_read(Path::new("./a/b/d.txt"))
+                .unwrap()
+                .read_to_string(&mut text)
+                .unwrap();
+            assert_eq!(text, "hello");
+            // A rename across directories inside the root works too, and a
+            // rename never replaces an existing entry.
+            root.rename_within(Path::new("a/b/d.txt"), Path::new("inner/d.txt"))
+                .unwrap();
+            assert_eq!(std::fs::read(f.root.join("inner/d.txt")).unwrap(), b"hello");
+            root.open_for_write(Path::new("a/e.txt"), None).unwrap();
+            let err = root
+                .rename_within(Path::new("inner/d.txt"), Path::new("a/e.txt"))
+                .unwrap_err();
+            assert!(!is_containment_error(&err), "{err:?}");
+            assert_eq!(std::fs::read(f.root.join("inner/d.txt")).unwrap(), b"hello");
+            root.set_mode(Path::new("inner/d.txt"), 0o640).unwrap();
+            // Re-opening for write truncates.
+            root.open_for_write(Path::new("inner/d.txt"), None)
+                .unwrap()
+                .write_all(b"hi")
+                .unwrap();
+            assert_eq!(std::fs::read(f.root.join("inner/d.txt")).unwrap(), b"hi");
+            // Directories are not files.
+            let err = root.open_for_write(Path::new("a"), None).unwrap_err();
+            assert_eq!(err.kind(), io::ErrorKind::IsADirectory);
+            let err = root.remove_file(Path::new("a")).unwrap_err();
+            assert!(!is_containment_error(&err), "{err:?}");
+            assert!(f.root.join("a").is_dir());
+            root.remove_file(Path::new("inner/d.txt")).unwrap();
+            assert!(root.exists(Path::new("inner/d.txt")).unwrap().is_none());
+            // A directory mtime can be set through the handle.
+            let when = SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000);
+            root.set_dir_modified(Path::new("a"), when).unwrap();
+            assert_eq!(
+                std::fs::metadata(f.root.join("a"))
+                    .unwrap()
+                    .modified()
+                    .unwrap(),
+                when
+            );
+            if f.file_symlinks {
+                // Symlinks are created as symlinks (never following the
+                // target) and removed as links.
+                root.symlink(Path::new("a/lnk"), Path::new("C:\\nowhere\\at\\all"))
+                    .unwrap();
+                assert_eq!(
+                    std::fs::read_link(f.root.join("a/lnk")).unwrap(),
+                    PathBuf::from("C:\\nowhere\\at\\all")
+                );
+                assert_eq!(
+                    root.exists(Path::new("a/lnk")).unwrap().unwrap().kind,
+                    EntryKind::Symlink
+                );
+                let err = root
+                    .symlink(Path::new("a/lnk"), Path::new("elsewhere"))
+                    .unwrap_err();
+                assert_eq!(err.kind(), io::ErrorKind::AlreadyExists);
+                root.remove_file(Path::new("a/lnk")).unwrap();
+                assert!(root.exists(Path::new("a/lnk")).unwrap().is_none());
+                // A relative target naming a directory inside the root gets a
+                // directory link; the link is removed as a link.
+                root.symlink(Path::new("a/tob"), Path::new("b")).unwrap();
+                let ft = std::fs::symlink_metadata(f.root.join("a/tob"))
+                    .unwrap()
+                    .file_type();
+                assert!(ft.is_symlink());
+                assert!(std::fs::metadata(f.root.join("a/tob")).unwrap().is_dir());
+                root.remove_file(Path::new("a/tob")).unwrap();
+                assert!(root.exists(Path::new("a/tob")).unwrap().is_none());
+                assert!(f.root.join("a/b").is_dir());
+                // A target that escapes never gets a directory link decision
+                // by resolving it: `..` means a file link.
+                root.symlink(Path::new("a/up"), Path::new("..\\..\\outside"))
+                    .unwrap();
+                assert!(
+                    !std::fs::symlink_metadata(f.root.join("a/up"))
+                        .unwrap()
+                        .file_type()
+                        .is_dir()
+                );
+            }
+        }
+
+        #[test]
+        fn create_dir_all_is_idempotent_and_refuses_files() {
+            let f = fixture();
+            let root = Root::open(&f.root).unwrap();
+            root.create_dir_all(Path::new("inner"), None).unwrap();
+            root.create_dir_all(Path::new("inner/x/y"), Some(0o750))
+                .unwrap();
+            root.create_dir_all(Path::new("inner/x/y"), Some(0o750))
+                .unwrap();
+            assert!(f.root.join("inner/x/y").is_dir());
+            root.open_for_write(Path::new("inner/file"), Some(0o644))
+                .unwrap();
+            let err = root
+                .create_dir_all(Path::new("inner/file/sub"), None)
+                .unwrap_err();
+            assert!(!is_containment_error(&err), "{err:?}");
+            let err = root
+                .create_dir_all(Path::new("inner/file"), None)
+                .unwrap_err();
+            assert!(!is_containment_error(&err), "{err:?}");
+            // The root itself is never a write target.
+            assert_refused(root.open_for_write(Path::new(""), None), "root");
+            assert_refused(root.remove_file(Path::new(".")), "root");
+        }
+
+        #[test]
+        fn remove_file_on_a_link_removes_the_link_not_the_target() {
+            let f = fixture();
+            let root = Root::open(&f.root).unwrap();
+            root.remove_file(Path::new("junc")).unwrap();
+            assert!(std::fs::symlink_metadata(f.root.join("junc")).is_err());
+            assert!(root.exists(Path::new("junc")).unwrap().is_none());
+            assert_eq!(std::fs::read(f.outside.join("target")).unwrap(), b"victim");
+            if f.dir_symlinks {
+                root.remove_file(Path::new("dlink")).unwrap();
+                assert!(std::fs::symlink_metadata(f.root.join("dlink")).is_err());
+            }
+            if f.file_symlinks {
+                root.remove_file(Path::new("existing")).unwrap();
+                assert!(std::fs::symlink_metadata(f.root.join("existing")).is_err());
+            }
+            assert_eq!(std::fs::read(f.outside.join("target")).unwrap(), b"victim");
+            assert!(f.outside.is_dir());
         }
     }
 }
