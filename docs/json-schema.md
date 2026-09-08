@@ -112,10 +112,22 @@ the repository.
 }
 ```
 
-Runs are newest first. `status` is `complete`, `partial (n skipped)` or
-`incomplete (no manifest)`; test `fatal_errors + ignored_errors == 0 && manifest_snapshot_id != null`
-rather than parsing the string. `os` is the tag value (`macos`, `linux`, `windows`). `size` and
-`files` exclude the manifest snapshot. `--host` and `--latest` filter the array.
+Runs are newest first. `status` is one label from this set, checked top to bottom (the same
+labels appear in `status --json` and the `snapshots` table, and `verify`/`restore` resolve runs
+the same way):
+
+| `status` | Meaning |
+|---|---|
+| `incomplete (no manifest)` | the run has no manifest snapshot; `moss backup` did not finish |
+| `incomplete` | Kopia marked a data snapshot incomplete (interrupted upload) |
+| `unknown (no error counts reported)` | a data snapshot carried no error count; not assumed clean |
+| `partial (n skipped)` | `n = fatal_errors + ignored_errors` paths were skipped |
+| `complete` | otherwise |
+
+Test `fatal_errors + ignored_errors == 0 && manifest_snapshot_id != null` rather than parsing the
+string. `os` is the tag value (`macos`, `linux`, `windows`), or `?` when the tag is missing.
+`size`, `files`, `sources` and `snapshot_ids` exclude the manifest snapshot. `--host`
+(case-insensitive) and `--latest` filter the array.
 
 ## `status --json`
 

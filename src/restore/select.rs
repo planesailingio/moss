@@ -5,9 +5,9 @@
 use std::collections::BTreeMap;
 
 use chrono::{DateTime, Utc};
+use serde::Serialize;
 
 use crate::backup::json::SnapshotManifest;
-use crate::backup::manifest::Manifest;
 use crate::backup::repository::Repository;
 use crate::backup::tags;
 use crate::error::{MossError, Result};
@@ -72,6 +72,80 @@ impl Run {
             })
             .unwrap_or_else(|| "unknown".into())
     }
+
+    /// The `STATUS` column (spec §19), one label set shared by `moss
+    /// snapshots`, `moss status`, `moss verify` and `moss restore`:
+    ///
+    /// | Condition                                   | Label                                |
+    /// |---------------------------------------------|--------------------------------------|
+    /// | no manifest snapshot in the run             | `incomplete (no manifest)`           |
+    /// | Kopia marked a member incomplete            | `incomplete`                         |
+    /// | a member reported no error count (spec §18) | `unknown (no error counts reported)` |
+    /// | fatal + ignored errors > 0                  | `partial (N skipped)`                |
+    /// | otherwise                                   | `complete`                           |
+    ///
+    /// Checks run top to bottom; the first that applies wins.
+    pub fn status_label(&self) -> String {
+        if self.manifest_snapshot.is_none() {
+            return "incomplete (no manifest)".into();
+        }
+        if self.incomplete {
+            return "incomplete".into();
+        }
+        if self.missing_counts {
+            return "unknown (no error counts reported)".into();
+        }
+        let skipped = self.fatal_errors + self.ignored_errors;
+        if skipped == 0 {
+            "complete".into()
+        } else {
+            format!("partial ({skipped} skipped)")
+        }
+    }
+
+    /// The serialisable view printed by `moss snapshots --json`.
+    pub fn summary(&self) -> RunSummary {
+        RunSummary {
+            id: self.id.clone(),
+            started: self.started,
+            host: self.host.clone(),
+            user: self.user.clone(),
+            os: self
+                .os
+                .map(|p| p.tag_value().to_string())
+                .unwrap_or_else(|| "?".into()),
+            profile: self.profile.clone().unwrap_or_default(),
+            size: self.total_size(),
+            files: self.file_count(),
+            sources: self.source_ids(),
+            snapshot_ids: self.members.iter().map(|m| m.id.clone()).collect(),
+            manifest_snapshot_id: self.manifest_snapshot.clone(),
+            fatal_errors: self.fatal_errors,
+            ignored_errors: self.ignored_errors,
+            status: self.status_label(),
+        }
+    }
+}
+
+/// A [`Run`] flattened for JSON output (`docs/json-schema.md`, `snapshots`).
+/// `size`, `files`, `sources` and `snapshot_ids` exclude the manifest snapshot.
+#[derive(Debug, Clone, Serialize)]
+pub struct RunSummary {
+    pub id: String,
+    pub started: Option<DateTime<Utc>>,
+    pub host: String,
+    pub user: String,
+    /// The `moss-os` tag value (`macos`, `linux`, `windows`), or `?`.
+    pub os: String,
+    pub profile: String,
+    pub size: u64,
+    pub files: u64,
+    pub sources: Vec<String>,
+    pub snapshot_ids: Vec<String>,
+    pub manifest_snapshot_id: Option<String>,
+    pub fatal_errors: u64,
+    pub ignored_errors: u64,
+    pub status: String,
 }
 
 /// Group raw snapshots into runs, newest first. Snapshots without a
@@ -136,32 +210,6 @@ pub fn group_runs(snapshots: Vec<SnapshotManifest>) -> Vec<Run> {
 /// Every run in the repository, newest first.
 pub fn list_runs(repo: &Repository) -> Result<Vec<Run>> {
     Ok(group_runs(repo.snapshot_list(&[])?))
-}
-
-/// The `STATUS` column (spec §19): `complete`, or `partial (N skipped)`.
-pub fn status_label(run: &Run, manifest: Option<&Manifest>) -> String {
-    let mut skipped = run.fatal_errors + run.ignored_errors;
-    if let Some(m) = manifest {
-        skipped += m.skipped.len() as u64;
-    }
-    if run.incomplete {
-        return if skipped > 0 {
-            format!("incomplete ({skipped} skipped)")
-        } else {
-            "incomplete".into()
-        };
-    }
-    if run.missing_counts {
-        return "unknown (no error counts reported)".into();
-    }
-    if run.manifest_snapshot.is_none() {
-        return "no manifest".into();
-    }
-    if skipped == 0 {
-        "complete".into()
-    } else {
-        format!("partial ({skipped} skipped)")
-    }
 }
 
 /// Resolve `latest` or a run-id prefix against the runs, optionally limited
@@ -305,22 +353,81 @@ mod tests {
             new.started.unwrap().to_rfc3339(),
             "2026-09-01T10:00:00+00:00"
         );
-        assert_eq!(status_label(new, None), "partial (2 skipped)");
-        assert_eq!(status_label(&runs[2], None), "complete");
+        assert_eq!(new.status_label(), "partial (2 skipped)");
+        assert_eq!(runs[2].status_label(), "complete");
         assert!(runs[1].missing_counts);
-        assert_eq!(
-            status_label(&runs[1], None),
-            "unknown (no error counts reported)"
-        );
     }
 
     #[test]
-    fn status_counts_manifest_skips() {
-        let runs = runs();
-        let mut m = crate::restore::test_support::sample_manifest();
-        assert_eq!(status_label(&runs[2], Some(&m)), "partial (1 skipped)");
-        m.skipped.clear();
-        assert_eq!(status_label(&runs[2], Some(&m)), "complete");
+    fn groups_and_labels_runs() {
+        let runs = group_runs(vec![
+            snap("a", "RUN1", "ssh", "mac", "2026-09-04T10:00:00Z", Some(0)),
+            snap(
+                "b",
+                "RUN1",
+                "documents",
+                "mac",
+                "2026-09-04T10:00:01Z",
+                Some(2),
+            ),
+            snap(
+                "c",
+                "RUN1",
+                "manifest",
+                "mac",
+                "2026-09-04T10:00:02Z",
+                Some(0),
+            ),
+            snap("d", "RUN2", "ssh", "mac", "2026-09-04T11:00:00Z", Some(0)),
+        ]);
+        assert_eq!(runs.len(), 2);
+        let r1 = runs.iter().find(|r| r.id == "RUN1").unwrap().summary();
+        assert_eq!(r1.size, 20, "manifest excluded from size");
+        assert_eq!(r1.files, 4);
+        assert_eq!(r1.sources, vec!["ssh", "documents"]);
+        assert_eq!(r1.snapshot_ids, vec!["a", "b"]);
+        assert_eq!(r1.manifest_snapshot_id.as_deref(), Some("c"));
+        assert_eq!(r1.fatal_errors, 2);
+        assert_eq!(r1.status, "partial (2 skipped)");
+        assert_eq!(r1.os, "linux");
+        assert_eq!(r1.profile, "p");
+        let r2 = runs.iter().find(|r| r.id == "RUN2").unwrap().summary();
+        assert_eq!(r2.status, "incomplete (no manifest)");
+        assert!(r2.manifest_snapshot_id.is_none());
+    }
+
+    #[test]
+    fn missing_error_count_is_not_treated_as_complete() {
+        let runs = group_runs(vec![
+            snap("a", "R", "ssh", "mac", "2026-09-04T10:00:00Z", None),
+            snap("m", "R", "manifest", "mac", "2026-09-04T10:00:01Z", Some(0)),
+        ]);
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].missing_counts);
+        assert_eq!(runs[0].status_label(), "unknown (no error counts reported)");
+        assert_eq!(runs[0].summary().status, runs[0].status_label());
+    }
+
+    #[test]
+    fn kopia_incomplete_flag_wins_over_error_counts() {
+        let mut broken = snap("a", "R", "ssh", "mac", "2026-09-04T10:00:00Z", Some(3));
+        broken.incomplete = Some("canceled".into());
+        let runs = group_runs(vec![
+            broken,
+            snap("m", "R", "manifest", "mac", "2026-09-04T10:00:01Z", Some(0)),
+        ]);
+        assert!(runs[0].incomplete);
+        assert_eq!(runs[0].status_label(), "incomplete");
+        // A missing manifest outranks everything else.
+        let runs = group_runs(vec![snap(
+            "a",
+            "R",
+            "ssh",
+            "mac",
+            "2026-09-04T10:00:00Z",
+            None,
+        )]);
+        assert_eq!(runs[0].status_label(), "incomplete (no manifest)");
     }
 
     #[test]

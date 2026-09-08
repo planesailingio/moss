@@ -3,9 +3,9 @@
 use clap::Args;
 
 use crate::cli::AppContext;
-use crate::cli::snapshots::group_runs;
 use crate::error::{ExitCode, MossError, Result};
 use crate::output::{confirm, human};
+use crate::restore::select::{self, RunSummary};
 
 #[derive(Debug, Args)]
 pub struct VerifyArgs {
@@ -43,9 +43,11 @@ pub fn status(ctx: &AppContext) -> Result<ExitCode> {
     let repo = connected.repository();
     let st = repo.status()?;
     let maint = repo.maintenance_info().ok();
-    let snapshots = repo.snapshot_list(&[])?;
-    let runs = group_runs(&snapshots);
-    let mut hosts: std::collections::BTreeMap<String, &crate::cli::snapshots::RunSummary> =
+    let runs: Vec<RunSummary> = select::list_runs(&repo)?
+        .iter()
+        .map(|r| r.summary())
+        .collect();
+    let mut hosts: std::collections::BTreeMap<String, &RunSummary> =
         std::collections::BTreeMap::new();
     for r in &runs {
         hosts.entry(r.host.clone()).or_insert(r);
@@ -140,16 +142,10 @@ pub fn verify(ctx: &AppContext, args: VerifyArgs) -> Result<ExitCode> {
     let console = ctx.console;
     let connected = ctx.connect()?;
     let repo = connected.repository();
-    let runs = group_runs(&repo.snapshot_list(&[])?);
-    let run = if args.selector == "latest" {
-        runs.first()
-    } else {
-        runs.iter()
-            .find(|r| r.id.starts_with(&args.selector.to_ascii_uppercase()))
-    }
-    .ok_or_else(|| MossError::Usage(format!("No run matches {:?}.", args.selector)))?;
-    let mut ids: Vec<&str> = run.snapshot_ids.iter().map(String::as_str).collect();
-    if let Some(m) = &run.manifest_snapshot_id {
+    let runs = select::list_runs(&repo)?;
+    let run = select::select_run(&runs, &args.selector, None)?;
+    let mut ids: Vec<&str> = run.members.iter().map(|m| m.id.as_str()).collect();
+    if let Some(m) = &run.manifest_snapshot {
         ids.push(m);
     }
     console.line(format!(
