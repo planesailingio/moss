@@ -7,7 +7,17 @@ use std::time::{Duration, Instant};
 
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::output::Console;
+/// How the scan reports progress. Chosen once by the CLI from its console
+/// settings so `scan` never depends on `output`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProgressMode {
+    /// `--quiet` or `--json`: nothing.
+    Silent,
+    /// stderr is a terminal: a live spinner line.
+    Spinner,
+    /// Not a terminal: a plain line every few seconds.
+    Plain,
+}
 
 #[derive(Default)]
 pub struct Counters {
@@ -26,10 +36,10 @@ pub struct Progress {
 }
 
 impl Progress {
-    pub fn start(console: &Console, label: &str, total_sources: usize) -> Progress {
+    pub fn start(mode: ProgressMode, label: &str, total_sources: usize) -> Progress {
         let counters = Arc::new(Counters::default());
         let stop = Arc::new(AtomicBool::new(false));
-        if console.quiet || console.json {
+        if mode == ProgressMode::Silent {
             return Progress {
                 counters,
                 bar: None,
@@ -37,7 +47,7 @@ impl Progress {
                 ticker: None,
             };
         }
-        if console.stderr_tty {
+        if mode == ProgressMode::Spinner {
             let bar = ProgressBar::new_spinner();
             bar.set_style(
                 ProgressStyle::with_template("{spinner} {msg}")

@@ -6,7 +6,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::backup::manifest::SkipReason;
+use crate::model::SkipReason;
 
 /// Classify an io error from a directory read or file open.
 pub fn classify_io_error(err: &std::io::Error) -> (SkipReason, Option<String>) {

@@ -39,7 +39,7 @@ pub fn run(ctx: &AppContext) -> Result<ExitCode> {
     let console = ctx.console;
     let mut checks: Vec<Check> = Vec::new();
     let adapter = ctx.adapter();
-    let home = adapter.home();
+    let home = adapter.home().to_path_buf();
 
     // Kopia
     match kopia::find_binary() {
@@ -243,7 +243,7 @@ pub fn run(ctx: &AppContext) -> Result<ExitCode> {
             status: Status::Fail,
             detail: format!(
                 "NOT granted ({} is EPERM)",
-                crate::profile::model::home_relative(&probe, &home)
+                crate::model::home_relative(&probe, &home)
             ),
             help: Some(format!(
                 "~/Library/Mail and other protected paths will be skipped.\n{}",

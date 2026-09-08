@@ -11,7 +11,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::config::{Config, PathRule};
 use crate::error::{MossError, Result};
-use crate::profile::model::expand_tilde;
+use crate::model::expand_tilde;
 use crate::profile::patterns::{self, ExclusionKind};
 
 pub struct RuleSet {

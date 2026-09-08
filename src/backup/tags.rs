@@ -3,8 +3,8 @@
 //! Kopia splits `--tags` on the first colon and rejects duplicate keys, so the
 //! keys use hyphens: `moss-run:<ulid>`.
 
+use crate::model::SemanticId;
 use crate::platform::Platform;
-use crate::profile::model::SemanticId;
 
 pub const RUN: &str = "moss-run";
 pub const PROFILE: &str = "moss-profile";

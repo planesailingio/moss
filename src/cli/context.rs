@@ -17,6 +17,7 @@ pub struct AppContext {
     pub paths: MossPaths,
     pub config_path: PathBuf,
     pub global: GlobalArgs,
+    adapter: Box<dyn PlatformAdapter>,
 }
 
 /// A connected repository with everything needed to call Kopia.
@@ -40,6 +41,21 @@ impl Connected {
 }
 
 impl AppContext {
+    pub fn new(
+        console: Console,
+        paths: MossPaths,
+        config_path: PathBuf,
+        global: GlobalArgs,
+    ) -> Self {
+        AppContext {
+            console,
+            paths,
+            config_path,
+            global,
+            adapter: platform::current_adapter(),
+        }
+    }
+
     pub fn load_config(&self) -> Result<Config> {
         config::load(&self.config_path)
     }
@@ -52,8 +68,20 @@ impl AppContext {
         config::save(&self.config_path, cfg)
     }
 
-    pub fn adapter(&self) -> Box<dyn PlatformAdapter> {
-        platform::current_adapter()
+    /// The platform adapter, detected once per invocation.
+    pub fn adapter(&self) -> &dyn PlatformAdapter {
+        self.adapter.as_ref()
+    }
+
+    /// How a scan should report progress, from the console settings.
+    pub fn progress_mode(&self) -> crate::scan::ProgressMode {
+        if self.console.quiet || self.console.json {
+            crate::scan::ProgressMode::Silent
+        } else if self.console.stderr_tty {
+            crate::scan::ProgressMode::Spinner
+        } else {
+            crate::scan::ProgressMode::Plain
+        }
     }
 
     /// The repository from config, with the `--repository` override applied.
@@ -130,7 +158,7 @@ pub fn parse_repository_url(url: &str) -> Result<RepositoryConfig> {
         )));
     } else {
         let home = platform::home_dir();
-        let p = crate::profile::model::expand_tilde(url, &home);
+        let p = crate::model::expand_tilde(url, &home);
         let p = if p.is_absolute() {
             p
         } else {

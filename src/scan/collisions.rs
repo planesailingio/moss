@@ -7,7 +7,7 @@ use std::path::Path;
 
 use unicode_normalization::UnicodeNormalization;
 
-use crate::backup::manifest::Collision;
+use crate::model::Collision;
 
 pub const WINDOWS_MAX_PATH: usize = 260;
 

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::platform::Platform;
+use super::Platform;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -122,25 +122,6 @@ impl SemanticId {
             .strip_prefix("custom:")
             .map(|rel| rel.split('/').collect::<PathBuf>())
     }
-
-    /// Built-in ids in spec §15 order.
-    pub const BUILTIN: [&'static str; 15] = [
-        "user_home",
-        "documents",
-        "desktop",
-        "downloads",
-        "pictures",
-        "video",
-        "music",
-        "public",
-        "aws",
-        "ssh",
-        "gnupg",
-        "kubernetes",
-        "docker",
-        "git",
-        "shell",
-    ];
 }
 
 impl fmt::Display for SemanticId {

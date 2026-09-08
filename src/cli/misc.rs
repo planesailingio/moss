@@ -5,7 +5,7 @@ use clap::{Args, Subcommand};
 use crate::cli::AppContext;
 use crate::config::PathRule;
 use crate::error::{ExitCode, MossError, Result};
-use crate::profile::model::{ProfileCategory, expand_tilde};
+use crate::model::{ProfileCategory, expand_tilde};
 use crate::security::recovery::{self, SheetInfo};
 
 #[derive(Debug, Args)]
@@ -102,7 +102,7 @@ pub fn config(ctx: &AppContext, args: ConfigArgs) -> Result<ExitCode> {
 
 pub fn include(ctx: &AppContext, args: IncludeArgs) -> Result<ExitCode> {
     let mut cfg = ctx.load_config_or_default()?;
-    let home = ctx.adapter().home();
+    let home = ctx.adapter().home().to_path_buf();
     let path = expand_tilde(&args.path, &home);
     if !path.exists() {
         return Err(MossError::Usage(format!(
@@ -111,7 +111,7 @@ pub fn include(ctx: &AppContext, args: IncludeArgs) -> Result<ExitCode> {
         )));
     }
     let entry = if path.starts_with(&home) {
-        crate::profile::model::home_relative(&path, &home)
+        crate::model::home_relative(&path, &home)
     } else {
         path.display().to_string()
     };
@@ -147,7 +147,7 @@ pub fn exclude(ctx: &AppContext, args: ExcludeArgs) -> Result<ExitCode> {
 
 fn refresh_sources(ctx: &AppContext, cfg: &mut crate::config::Config) {
     if !cfg.sources.is_empty() {
-        cfg.sources = crate::profile::discovery::discover(ctx.adapter().as_ref(), cfg);
+        cfg.sources = crate::profile::discovery::discover(ctx.adapter(), cfg);
     }
 }
 

@@ -355,7 +355,7 @@ pub fn scan_restored(
 ) -> Vec<Finding> {
     let mut out = Vec::new();
     for path in restored {
-        let display = crate::profile::model::home_relative(path, dest_home);
+        let display = crate::model::home_relative(path, dest_home);
         let Some(kind) = kind_for(&display) else {
             continue;
         };

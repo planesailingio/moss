@@ -13,8 +13,8 @@ use crate::backup::repository::Repository;
 use crate::backup::tags;
 use crate::config::Config;
 use crate::error::{MossError, Result};
+use crate::model::ProfileSource;
 use crate::platform::HostInfo;
-use crate::profile::model::ProfileSource;
 use crate::scan::ScanResult;
 
 #[derive(Debug, Serialize)]

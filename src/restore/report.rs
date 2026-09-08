@@ -5,9 +5,9 @@
 use serde::Serialize;
 
 use crate::error::ExitCode;
+use crate::model::ProfileCategory;
 use crate::output::{Console, human};
 use crate::platform::Platform;
-use crate::profile::model::ProfileCategory;
 use crate::restore::translate::Finding;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

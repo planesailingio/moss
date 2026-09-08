@@ -5,17 +5,18 @@ pub mod index;
 pub mod progress;
 pub mod walker;
 
+pub use progress::ProgressMode;
+
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::backup::manifest::{Collision, Skipped};
 use crate::config::{Config, MossPaths};
 use crate::error::Result;
-use crate::output::Console;
+use crate::model::{Collision, Skipped};
+use crate::model::{ProfileCategory, ProfileSource, SemanticId};
 use crate::platform::PlatformAdapter;
-use crate::profile::model::{ProfileCategory, ProfileSource, SemanticId};
 use crate::profile::patterns::ExclusionKind;
 use crate::profile::rules::RuleSet;
 use crate::profile::sensitive::SensitiveKind;
@@ -93,7 +94,7 @@ pub fn build_rules(
     let home = adapter.home();
     let now = chrono::Utc::now();
     if !index.tool_caches_fresh(now) {
-        index.tool_caches = tools::query_all(&home);
+        index.tool_caches = tools::query_all(home);
         index.tool_caches_at = Some(now);
     }
     let mut extra: Vec<(PathBuf, ExclusionKind)> = Vec::new();
@@ -106,12 +107,12 @@ pub fn build_rules(
     for t in &index.tool_caches {
         extra.push((t.path.clone(), ExclusionKind::Cache));
     }
-    RuleSet::build(config, &home, &extra)
+    RuleSet::build(config, home, &extra)
 }
 
 /// Scan the given sources in parallel and refresh the index.
 pub fn scan(
-    console: &Console,
+    progress_mode: ProgressMode,
     paths: &MossPaths,
     home: &Path,
     rules: &RuleSet,
@@ -121,7 +122,7 @@ pub fn scan(
 ) -> Result<ScanResult> {
     let now = chrono::Utc::now();
     let previous_age = index.age_seconds(now);
-    let progress = progress::Progress::start(console, &opts.label, sources.len());
+    let progress = progress::Progress::start(progress_mode, &opts.label, sources.len());
     let counters = progress.counters();
     let parallelism = std::thread::available_parallelism()
         .map(|n| n.get())

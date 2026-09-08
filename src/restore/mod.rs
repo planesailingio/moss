@@ -14,8 +14,8 @@ pub mod translate;
 #[cfg(test)]
 pub(crate) mod test_support {
     use crate::backup::manifest::{Manifest, ManifestSource, SkipReason, Skipped, Totals};
+    use crate::model::{Portability, ProfileCategory, SemanticId};
     use crate::platform::Platform;
-    use crate::profile::model::{Portability, ProfileCategory, SemanticId};
 
     pub fn source(id: &str, category: ProfileCategory, path: &str) -> ManifestSource {
         ManifestSource {

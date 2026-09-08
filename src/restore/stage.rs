@@ -173,7 +173,7 @@ pub fn validate_manifest(manifest: &Manifest, run: &Run) -> Result<()> {
 /// The selection of manifest sources to restore.
 pub fn select_sources<'a>(
     manifest: &'a Manifest,
-    categories: &[crate::profile::model::ProfileCategory],
+    categories: &[crate::model::ProfileCategory],
     ids: &[String],
 ) -> Result<Vec<&'a ManifestSource>> {
     let selected: Vec<&ManifestSource> = manifest
@@ -214,7 +214,7 @@ pub fn select_sources<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::model::ProfileCategory;
+    use crate::model::ProfileCategory;
     use crate::restore::test_support::sample_manifest;
 
     fn run_for(manifest: &Manifest) -> Run {

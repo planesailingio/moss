@@ -43,10 +43,10 @@ pub fn run(ctx: &AppContext, args: BackupArgs) -> Result<ExitCode> {
     }
 
     let adapter = ctx.adapter();
-    let host = crate::platform::host_info(adapter.as_ref());
+    let host = crate::platform::host_info(adapter);
     ctx.paths.ensure()?;
     let sources = if config.sources.is_empty() {
-        discovery::discover(adapter.as_ref(), config)
+        discovery::discover(adapter, config)
     } else {
         config.sources.clone()
     };
@@ -59,9 +59,9 @@ pub fn run(ctx: &AppContext, args: BackupArgs) -> Result<ExitCode> {
     }
 
     let mut index = scan::index::ScanIndex::load(&ctx.paths.scan_index());
-    let rules = scan::build_rules(config, adapter.as_ref(), &ctx.paths, &mut index)?;
+    let rules = scan::build_rules(config, adapter, &ctx.paths, &mut index)?;
     let result = scan::scan(
-        &console,
+        ctx.progress_mode(),
         &ctx.paths,
         &host.home,
         &rules,

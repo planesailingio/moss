@@ -8,9 +8,9 @@ use std::sync::{Arc, Mutex};
 
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
-use crate::backup::manifest::{Collision, SkipReason, Skipped};
+use crate::model::home_relative;
+use crate::model::{Collision, SkipReason, Skipped};
 use crate::platform::tcc::classify_io_error;
-use crate::profile::model::home_relative;
 use crate::profile::patterns::ExclusionKind;
 use crate::profile::rules::{RuleSet, Verdict};
 use crate::profile::sensitive::{self, SensitiveKind};

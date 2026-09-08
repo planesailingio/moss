@@ -10,8 +10,9 @@ use crate::cli::AppContext;
 use crate::config::ConflictPolicy;
 use crate::error::{ExitCode, MossError, Result};
 use crate::lock::Lock;
+use crate::model::{ProfileCategory, home_relative};
 use crate::output::prompt_line;
-use crate::profile::model::{ProfileCategory, home_relative};
+use crate::profile::locations;
 use crate::restore::conflict::Resolver;
 use crate::restore::contain::Root;
 use crate::restore::journal::{self, Journal, ResumeState};
@@ -67,7 +68,7 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
     let connected = ctx.connect()?;
     let repo = connected.repository();
     let adapter = ctx.adapter();
-    let dest_home = adapter.home();
+    let dest_home = adapter.home().to_path_buf();
     let dest_os = adapter.platform();
 
     // Interrupted restore? (spec §18)
@@ -204,7 +205,7 @@ pub fn run(ctx: &AppContext, args: RestoreArgs) -> Result<ExitCode> {
     for source in &sources {
         let id = source.id.as_str();
         // Destination mapping through this platform's adapter (spec §15).
-        let Some(dest_abs) = adapter.destination_for(&source.id) else {
+        let Some(dest_abs) = locations::destination_for(adapter, &source.id) else {
             report.push_source(SourceReport {
                 id: id.into(),
                 category: source.category,

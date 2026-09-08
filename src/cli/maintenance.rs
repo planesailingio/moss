@@ -162,7 +162,7 @@ pub fn verify(ctx: &AppContext, args: VerifyArgs) -> Result<ExitCode> {
 
     let mut mode_problems = Vec::new();
     if args.check_modes {
-        mode_problems = check_credential_modes(&ctx.adapter().home());
+        mode_problems = check_credential_modes(ctx.adapter().home());
     }
     if console.json {
         console.json_report(&serde_json::json!({

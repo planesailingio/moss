@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-use crate::profile::model::{Inclusion, ProfileCategory, ProfileSource};
+use crate::model::{ProfileCategory, ProfileSource};
 
 pub const CONFIG_SCHEMA_VERSION: u32 = 1;
 
@@ -284,19 +284,6 @@ impl PathRule {
             path: path.into(),
             category: None,
         }
-    }
-}
-
-/// Convenience for the profile layer.
-pub fn inclusion_for(
-    default: Inclusion,
-    include_containers: bool,
-    is_container: bool,
-) -> Inclusion {
-    if is_container && !include_containers {
-        Inclusion::OptIn
-    } else {
-        default
     }
 }
 

@@ -161,22 +161,8 @@ fn is_ssh_private_key(name: &str) -> bool {
 }
 
 /// Whether a whole source directory is a credentials source (spec §9 `sensitive`).
-pub fn is_sensitive_source(home_relative: &str) -> bool {
-    matches!(
-        home_relative.trim_start_matches("~/"),
-        ".ssh"
-            | ".aws"
-            | ".gnupg"
-            | ".kube"
-            | ".docker"
-            | ".azure"
-            | ".config/gcloud"
-            | ".terraform.d"
-    )
-}
-
 pub fn classify_path(path: &Path, home: &Path) -> Option<SensitiveKind> {
-    let rel = crate::profile::model::home_relative(path, home);
+    let rel = crate::model::home_relative(path, home);
     classify(&rel)
 }
 
@@ -253,11 +239,5 @@ mod tests {
             Some(SensitiveKind::PasswordManagerExport)
         );
         assert_eq!(classify("~/Documents/notes.txt"), None);
-    }
-
-    #[test]
-    fn sensitive_sources() {
-        assert!(is_sensitive_source("~/.ssh"));
-        assert!(!is_sensitive_source("~/Documents"));
     }
 }

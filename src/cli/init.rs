@@ -75,7 +75,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
         .ok_or_else(|| MossError::Usage("--repository is required".into()))?;
     let console = ctx.console;
     let adapter = ctx.adapter();
-    let host = crate::platform::host_info(adapter.as_ref());
+    let host = crate::platform::host_info(adapter);
     let mut config = ctx.load_config_or_default()?;
 
     console.line("Welcome to moss.\n");
@@ -209,7 +209,7 @@ pub fn run(ctx: &AppContext, args: InitArgs) -> Result<ExitCode> {
     crate::config::paths::make_private_file(&kopia_ctx.config_file)?;
 
     // Discovery (spec §8): written into config so the user can see and edit it.
-    config.sources = discovery::discover(adapter.as_ref(), &config);
+    config.sources = discovery::discover(adapter, &config);
     // Re-init keeps what the previous configuration knew about this
     // repository; only a genuine create stamps a new creation time.
     if let Some(prev) = config.repository.as_ref().filter(|r| r.id == repo.id) {

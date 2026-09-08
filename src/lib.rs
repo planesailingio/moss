@@ -9,6 +9,7 @@ pub mod credentials;
 pub mod endpoints;
 pub mod error;
 pub mod lock;
+pub mod model;
 pub mod output;
 pub mod platform;
 pub mod profile;

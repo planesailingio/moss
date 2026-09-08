@@ -9,9 +9,9 @@ use serde::Serialize;
 
 use crate::cli::AppContext;
 use crate::error::{ExitCode, Result};
+use crate::model::{Inclusion, ProfileCategory};
 use crate::output::human;
 use crate::profile::discovery;
-use crate::profile::model::{Inclusion, ProfileCategory};
 use crate::scan::{self, ScanOptions, ScanResult};
 
 #[derive(Debug, Args)]
@@ -74,20 +74,20 @@ pub fn run(ctx: &AppContext, args: InspectArgs) -> Result<ExitCode> {
     let console = ctx.console;
     let config = ctx.load_config_or_default()?;
     let adapter = ctx.adapter();
-    let host = crate::platform::host_info(adapter.as_ref());
+    let host = crate::platform::host_info(adapter);
     ctx.paths.ensure()?;
 
     // Prefer the sources written at init; fall back to live discovery.
     let sources = if config.sources.is_empty() {
-        discovery::discover(adapter.as_ref(), &config)
+        discovery::discover(adapter, &config)
     } else {
         config.sources.clone()
     };
     let selected = discovery::selected(&sources, &config);
     let mut index = scan::index::ScanIndex::load(&ctx.paths.scan_index());
-    let rules = scan::build_rules(&config, adapter.as_ref(), &ctx.paths, &mut index)?;
+    let rules = scan::build_rules(&config, adapter, &ctx.paths, &mut index)?;
     let result = scan::scan(
-        &console,
+        ctx.progress_mode(),
         &ctx.paths,
         &host.home,
         &rules,

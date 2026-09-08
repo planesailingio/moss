@@ -1,406 +1,51 @@
-//! Profile discovery (spec §8): the platform's standard directories, the
-//! well-known dotfiles, and the user's includes, as semantic sources.
+//! Profile discovery (spec §8): the built-in table (`locations::BUILTINS`)
+//! resolved on this machine, plus the user's includes, as semantic sources.
 //!
 //! Every path is validated to exist before it becomes a source. Nothing is
 //! invented.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use crate::config::Config;
-use crate::platform::{Platform, PlatformAdapter};
-use crate::profile::model::{
-    Inclusion, Portability, ProfileCategory, ProfileSource, SemanticId, expand_tilde, home_relative,
+use crate::model::{
+    Inclusion, Portability, ProfileCategory, ProfileSource, SemanticId, expand_tilde,
 };
-use crate::profile::sensitive::is_sensitive_source;
-
-/// A dotfile or application directory moss knows about. `path` is
-/// home-relative with forward slashes.
-struct Known {
-    id: &'static str,
-    path: &'static str,
-    category: ProfileCategory,
-    portable: Portability,
-    reason: &'static str,
-    /// `None` = all platforms.
-    only: Option<Platform>,
-    action: Inclusion,
-}
-
-const KNOWN: &[Known] = &[
-    Known {
-        id: "ssh",
-        path: ".ssh",
-        category: ProfileCategory::Credentials,
-        portable: Portability::Portable,
-        reason: "SSH keys, config and known hosts",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "aws",
-        path: ".aws",
-        category: ProfileCategory::Credentials,
-        portable: Portability::Portable,
-        reason: "AWS CLI configuration and credentials",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "gnupg",
-        path: ".gnupg",
-        category: ProfileCategory::Credentials,
-        portable: Portability::Portable,
-        reason: "GnuPG keyrings and trust database",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "kubernetes",
-        path: ".kube",
-        category: ProfileCategory::Credentials,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "Kubernetes contexts and credentials",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "docker",
-        path: ".docker",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "Docker CLI config and contexts (VM images excluded)",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "git",
-        path: ".gitconfig",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "Global Git configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "azure",
-        path: ".azure",
-        category: ProfileCategory::Credentials,
-        portable: Portability::Portable,
-        reason: "Azure CLI profile and tokens",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "talos",
-        path: ".talos",
-        category: ProfileCategory::Credentials,
-        portable: Portability::Portable,
-        reason: "Talos cluster configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "terraform",
-        path: ".terraform.d",
-        category: ProfileCategory::Development,
-        portable: Portability::Portable,
-        reason: "Terraform CLI credentials and plugin cache config",
-        only: None,
-        action: Inclusion::Include,
-    },
-    // k9s keeps config, skins, plugins and hotkeys here. Same id on every
-    // platform; the path differs. `~/.config/k9s` is nested under the
-    // `config` source, so it only surfaces on its own when `~/.config` is not
-    // itself selected; restore still maps `k9s` onto it (spec §15).
-    Known {
-        id: "k9s",
-        path: "Library/Application Support/k9s",
-        category: ProfileCategory::Development,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "k9s configuration, skins and plugins",
-        only: Some(Platform::MacOs),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "k9s",
-        path: ".config/k9s",
-        category: ProfileCategory::Development,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "k9s configuration, skins and plugins",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "config",
-        path: ".config",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "XDG application configuration (caches excluded)",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "claude",
-        path: ".claude",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "Claude Code settings, memory and projects",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "codex",
-        path: ".codex",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "Codex CLI state",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_zshrc",
-        path: ".zshrc",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "zsh configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_zprofile",
-        path: ".zprofile",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "zsh login configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_bashrc",
-        path: ".bashrc",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "bash configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_bash_profile",
-        path: ".bash_profile",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "bash login configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_profile",
-        path: ".profile",
-        category: ProfileCategory::Configuration,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "POSIX shell login configuration",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_bash_history",
-        path: ".bash_history",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::Portable,
-        reason: "bash history",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "shell_zsh_history",
-        path: ".zsh_history",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::Portable,
-        reason: "zsh history",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "npm_config",
-        path: ".npmrc",
-        category: ProfileCategory::Development,
-        portable: Portability::Portable,
-        reason: "npm configuration (cache excluded)",
-        only: None,
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "local_share",
-        path: ".local/share",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PortableWithPathTranslation,
-        reason: "XDG application data (Trash excluded)",
-        only: Some(Platform::Linux),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "local_state",
-        path: ".local/state",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::MachineSpecific,
-        reason: "XDG state",
-        only: Some(Platform::Linux),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "mozilla",
-        path: ".mozilla",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "Firefox profiles",
-        only: Some(Platform::Linux),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "flatpak",
-        path: ".var",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "Flatpak application data",
-        only: Some(Platform::Linux),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "app_support",
-        path: "Library/Application Support",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "macOS application support data (large, mostly app-managed state; opt-in)",
-        only: Some(Platform::MacOs),
-        action: Inclusion::OptIn,
-    },
-    Known {
-        id: "preferences",
-        path: "Library/Preferences",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "macOS preference plists",
-        only: Some(Platform::MacOs),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "containers",
-        path: "Library/Containers",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "Sandboxed app containers (TCC-gated per app; opt-in)",
-        only: Some(Platform::MacOs),
-        action: Inclusion::OptIn,
-    },
-    Known {
-        id: "group_containers",
-        path: "Library/Group Containers",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "App group containers (TCC-gated; opt-in)",
-        only: Some(Platform::MacOs),
-        action: Inclusion::OptIn,
-    },
-    Known {
-        id: "mail",
-        path: "Library/Mail",
-        category: ProfileCategory::PersonalData,
-        portable: Portability::PlatformSpecific,
-        reason: "Apple Mail (requires Full Disk Access)",
-        only: Some(Platform::MacOs),
-        action: Inclusion::OptIn,
-    },
-    Known {
-        id: "appdata_roaming",
-        path: "AppData/Roaming",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::PlatformSpecific,
-        reason: "Roaming application data",
-        only: Some(Platform::Windows),
-        action: Inclusion::Include,
-    },
-    Known {
-        id: "appdata_local",
-        path: "AppData/Local",
-        category: ProfileCategory::ApplicationState,
-        portable: Portability::MachineSpecific,
-        reason: "Local application data (caches excluded)",
-        only: Some(Platform::Windows),
-        action: Inclusion::OptIn,
-    },
-];
-
-/// Standard user directories that are opt-in rather than included by default.
-/// `~/Downloads` is a landing zone for installers and transient files; the
-/// user says `moss include ~/Downloads` to back it up.
-const OPT_IN_USER_DIRS: &[&str] = &["downloads"];
-
-fn user_dir_category(id: &str) -> (ProfileCategory, &'static str) {
-    match id {
-        "documents" => (ProfileCategory::PersonalData, "Standard documents folder"),
-        "desktop" => (ProfileCategory::PersonalData, "Desktop"),
-        "downloads" => (
-            ProfileCategory::PersonalData,
-            "Downloads (transient by default; opt-in)",
-        ),
-        "pictures" => (ProfileCategory::PersonalData, "Pictures"),
-        "video" => (
-            ProfileCategory::PersonalData,
-            "Video folder (Movies on macOS, Videos elsewhere)",
-        ),
-        "music" => (ProfileCategory::PersonalData, "Music"),
-        "public" => (ProfileCategory::PersonalData, "Public folder"),
-        _ => (ProfileCategory::Unknown, "Standard user directory"),
-    }
-}
+use crate::platform::PlatformAdapter;
+use crate::profile::locations::{self, BUILTINS};
 
 /// Discover sources on this machine.
 pub fn discover(adapter: &dyn PlatformAdapter, config: &Config) -> Vec<ProfileSource> {
-    let home = adapter.home();
+    let home = adapter.home().to_path_buf();
     let platform = adapter.platform();
     let mut out: Vec<ProfileSource> = Vec::new();
 
-    for known in adapter.known_dirs() {
-        let (category, reason) = user_dir_category(known.id.as_str());
-        let default_action = if OPT_IN_USER_DIRS.contains(&known.id.as_str()) {
-            Inclusion::OptIn
-        } else {
-            Inclusion::Include
+    for b in BUILTINS.iter().filter(|b| b.discovered_on(platform)) {
+        let Some(path) = b.location(platform).and_then(|l| adapter.resolve(l)) else {
+            continue;
         };
-        out.push(ProfileSource {
-            id: known.id,
-            path: known.path,
-            category,
-            platform,
-            reason: reason.to_string(),
-            default_action,
-            sensitive: false,
-            portable: Portability::PortableWithPathTranslation,
-        });
-    }
-
-    for k in KNOWN {
-        if k.only.is_some_and(|p| p != platform) {
+        // A user directory disabled in `user-dirs.dirs` resolves to home itself.
+        if path == home || !path.exists() {
+            tracing::debug!(id = b.id, path = %path.display(), "known source absent; skipped");
             continue;
         }
-        let path = home.join(k.path.split('/').collect::<PathBuf>());
-        if !path.exists() {
-            tracing::debug!(path = %path.display(), "known source absent; skipped");
+        // Two rows of one id can coincide (both k9s rows when XDG_CONFIG_HOME
+        // points at ~/.config); keep the first.
+        if out.iter().any(|s| s.id.as_str() == b.id && s.path == path) {
             continue;
         }
-        let mut action = k.action;
-        if config.backup.include_containers && matches!(k.id, "containers" | "group_containers") {
+        let mut action = b.action;
+        if config.backup.include_containers && matches!(b.id, "containers" | "group_containers") {
             action = Inclusion::Include;
         }
         out.push(ProfileSource {
-            id: SemanticId::new(k.id),
+            id: SemanticId::new(b.id),
             path,
-            category: k.category,
+            category: b.category,
             platform,
-            reason: k.reason.to_string(),
+            reason: b.reason.to_string(),
             default_action: action,
-            sensitive: is_sensitive_source(&format!("~/{}", k.path)),
-            portable: k.portable,
+            sensitive: b.sensitive,
+            portable: b.portable,
         });
     }
 
@@ -436,7 +81,7 @@ pub fn discover(adapter: &dyn PlatformAdapter, config: &Config) -> Vec<ProfileSo
             platform,
             reason: "Included by user".to_string(),
             default_action: Inclusion::Include,
-            sensitive: is_sensitive_source(&home_relative(&path, &home)),
+            sensitive: locations::is_sensitive_path(adapter, &path),
             portable,
         });
     }
@@ -468,16 +113,13 @@ pub fn selected<'a>(sources: &'a [ProfileSource], config: &Config) -> Vec<&'a Pr
         .collect()
 }
 
-/// Sources that would be nested inside another selected source are skipped in
-/// the walk; expose that for `inspect`.
-pub fn is_under_home(path: &Path, home: &Path) -> bool {
-    path.starts_with(home)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::profile::macos::MacOsAdapter;
+    use crate::platform::UserDir;
+    use crate::platform::linux::LinuxAdapter;
+    use crate::platform::macos::MacOsAdapter;
+    use crate::platform::windows::WindowsAdapter;
 
     #[test]
     fn discovers_only_existing_paths_with_semantic_ids() {
@@ -620,5 +262,197 @@ mod tests {
         let sources = discover(&adapter, &config);
         let ids: Vec<&str> = sources.iter().map(|s| s.id.as_str()).collect();
         assert_eq!(ids, vec!["documents"]);
+    }
+
+    /// Everything the table can discover, on a home that has all of it. The
+    /// expected lists were captured from the hand-written `KNOWN` table this
+    /// module replaced, so `config.yaml` written by an older moss keeps
+    /// matching what discovery produces (ids and paths are a persisted
+    /// contract). Additions are allowed only deliberately; check the diff.
+    #[test]
+    fn discovery_golden() {
+        const DIRS: &[&str] = &[
+            "Desktop",
+            "Documents",
+            "Downloads",
+            "Movies",
+            "Music",
+            "Pictures",
+            "Public",
+            "Videos",
+            ".ssh",
+            ".aws",
+            ".gnupg",
+            ".kube",
+            ".docker",
+            ".azure",
+            ".talos",
+            ".terraform.d",
+            ".config",
+            ".config/k9s",
+            ".claude",
+            ".codex",
+            ".local/share",
+            ".local/state",
+            ".mozilla",
+            ".var",
+            "Library/Application Support",
+            "Library/Application Support/k9s",
+            "Library/Preferences",
+            "Library/Containers",
+            "Library/Group Containers",
+            "Library/Mail",
+            "AppData/Roaming",
+            "AppData/Local",
+        ];
+        const FILES: &[&str] = &[
+            ".gitconfig",
+            ".zshrc",
+            ".zprofile",
+            ".bashrc",
+            ".bash_profile",
+            ".profile",
+            ".bash_history",
+            ".zsh_history",
+            ".npmrc",
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path().join("home");
+        for d in DIRS {
+            std::fs::create_dir_all(home.join(d)).unwrap();
+        }
+        for f in FILES {
+            std::fs::write(home.join(f), "x").unwrap();
+        }
+        let cfg = Config::default();
+        let ids = |sources: Vec<ProfileSource>| -> Vec<(String, String)> {
+            sources
+                .iter()
+                .map(|s| {
+                    (
+                        s.id.to_string(),
+                        crate::model::home_relative(&s.path, &home),
+                    )
+                })
+                .collect()
+        };
+        let expect = |rows: &[(&str, &str)]| -> Vec<(String, String)> {
+            rows.iter()
+                .map(|(i, p)| (i.to_string(), p.to_string()))
+                .collect()
+        };
+        let mac = ids(discover(&MacOsAdapter::with_home(home.clone()), &cfg));
+        assert_eq!(mac, expect(MACOS));
+        let lin = ids(discover(
+            &LinuxAdapter::with_home(home.clone(), tmp.path().join("no-etc")),
+            &cfg,
+        ));
+        assert_eq!(lin, expect(LINUX));
+        let known: Vec<(UserDir, PathBuf)> = UserDir::ALL
+            .into_iter()
+            .map(|d| (d, home.join(d.english_name())))
+            .collect();
+        let win = ids(discover(&WindowsAdapter::with(home.clone(), known), &cfg));
+        assert_eq!(win, expect(WINDOWS));
+
+        const MACOS: &[(&str, &str)] = &[
+            ("app_support", "~/Library/Application Support"),
+            ("aws", "~/.aws"),
+            ("azure", "~/.azure"),
+            ("claude", "~/.claude"),
+            ("codex", "~/.codex"),
+            ("config", "~/.config"),
+            ("containers", "~/Library/Containers"),
+            ("desktop", "~/Desktop"),
+            ("docker", "~/.docker"),
+            ("documents", "~/Documents"),
+            ("downloads", "~/Downloads"),
+            ("git", "~/.gitconfig"),
+            ("gnupg", "~/.gnupg"),
+            ("group_containers", "~/Library/Group Containers"),
+            ("k9s", "~/Library/Application Support/k9s"),
+            ("kubernetes", "~/.kube"),
+            ("mail", "~/Library/Mail"),
+            ("music", "~/Music"),
+            ("npm_config", "~/.npmrc"),
+            ("pictures", "~/Pictures"),
+            ("preferences", "~/Library/Preferences"),
+            ("public", "~/Public"),
+            ("shell_bash_history", "~/.bash_history"),
+            ("shell_bash_profile", "~/.bash_profile"),
+            ("shell_bashrc", "~/.bashrc"),
+            ("shell_profile", "~/.profile"),
+            ("shell_zprofile", "~/.zprofile"),
+            ("shell_zsh_history", "~/.zsh_history"),
+            ("shell_zshrc", "~/.zshrc"),
+            ("ssh", "~/.ssh"),
+            ("talos", "~/.talos"),
+            ("terraform", "~/.terraform.d"),
+            ("video", "~/Movies"),
+        ];
+        const LINUX: &[(&str, &str)] = &[
+            ("aws", "~/.aws"),
+            ("azure", "~/.azure"),
+            ("claude", "~/.claude"),
+            ("codex", "~/.codex"),
+            ("config", "~/.config"),
+            ("desktop", "~/Desktop"),
+            ("docker", "~/.docker"),
+            ("documents", "~/Documents"),
+            ("downloads", "~/Downloads"),
+            ("flatpak", "~/.var"),
+            ("git", "~/.gitconfig"),
+            ("gnupg", "~/.gnupg"),
+            ("kubernetes", "~/.kube"),
+            ("local_share", "~/.local/share"),
+            ("local_state", "~/.local/state"),
+            ("mozilla", "~/.mozilla"),
+            ("music", "~/Music"),
+            ("npm_config", "~/.npmrc"),
+            ("pictures", "~/Pictures"),
+            ("public", "~/Public"),
+            ("shell_bash_history", "~/.bash_history"),
+            ("shell_bash_profile", "~/.bash_profile"),
+            ("shell_bashrc", "~/.bashrc"),
+            ("shell_profile", "~/.profile"),
+            ("shell_zprofile", "~/.zprofile"),
+            ("shell_zsh_history", "~/.zsh_history"),
+            ("shell_zshrc", "~/.zshrc"),
+            ("ssh", "~/.ssh"),
+            ("talos", "~/.talos"),
+            ("terraform", "~/.terraform.d"),
+            ("video", "~/Videos"),
+        ];
+        const WINDOWS: &[(&str, &str)] = &[
+            ("appdata_local", "~/AppData/Local"),
+            ("appdata_roaming", "~/AppData/Roaming"),
+            ("aws", "~/.aws"),
+            ("azure", "~/.azure"),
+            ("claude", "~/.claude"),
+            ("codex", "~/.codex"),
+            ("config", "~/.config"),
+            ("desktop", "~/Desktop"),
+            ("docker", "~/.docker"),
+            ("documents", "~/Documents"),
+            ("downloads", "~/Downloads"),
+            ("git", "~/.gitconfig"),
+            ("gnupg", "~/.gnupg"),
+            ("kubernetes", "~/.kube"),
+            ("music", "~/Music"),
+            ("npm_config", "~/.npmrc"),
+            ("pictures", "~/Pictures"),
+            ("public", "~/Public"),
+            ("shell_bash_history", "~/.bash_history"),
+            ("shell_bash_profile", "~/.bash_profile"),
+            ("shell_bashrc", "~/.bashrc"),
+            ("shell_profile", "~/.profile"),
+            ("shell_zprofile", "~/.zprofile"),
+            ("shell_zsh_history", "~/.zsh_history"),
+            ("shell_zshrc", "~/.zshrc"),
+            ("ssh", "~/.ssh"),
+            ("talos", "~/.talos"),
+            ("terraform", "~/.terraform.d"),
+            ("video", "~/Videos"),
+        ];
     }
 }

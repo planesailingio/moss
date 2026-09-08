@@ -185,12 +185,7 @@ fn run(cli: Cli, console: Console) -> Result<ExitCode> {
             "Named profiles are not available in this version (got --profile {p}); only `default` is supported."
         )));
     }
-    let ctx = AppContext {
-        console,
-        paths,
-        config_path,
-        global: cli.global.clone(),
-    };
+    let ctx = AppContext::new(console, paths, config_path, cli.global.clone());
     match cli.command {
         Command::Init(args) => init::run(&ctx, args),
         Command::Doctor => doctor::run(&ctx),

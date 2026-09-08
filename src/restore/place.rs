@@ -12,8 +12,8 @@ use std::time::SystemTime;
 
 use crate::backup::manifest::{Collision, Manifest, ManifestSource};
 use crate::error::Result;
+use crate::model::home_relative;
 use crate::platform::Platform;
-use crate::profile::model::home_relative;
 use crate::restore::conflict::{Decision, Existing, Resolver, Staged};
 use crate::restore::contain::{self, Root};
 use crate::restore::journal::{Action, Journal, ResumeState};
@@ -529,7 +529,7 @@ pub fn check_collisions(
 mod tests {
     use super::*;
     use crate::config::ConflictPolicy;
-    use crate::profile::model::ProfileCategory;
+    use crate::model::ProfileCategory;
     use crate::restore::journal;
     use crate::restore::test_support::{sample_manifest, source};
     use std::os::unix::fs::PermissionsExt;

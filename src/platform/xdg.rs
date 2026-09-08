@@ -10,30 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-pub const KEYS: [&str; 8] = [
-    "DESKTOP",
-    "DOWNLOAD",
-    "TEMPLATES",
-    "PUBLICSHARE",
-    "DOCUMENTS",
-    "MUSIC",
-    "PICTURES",
-    "VIDEOS",
-];
-
-pub fn english_default(key: &str) -> Option<&'static str> {
-    Some(match key {
-        "DESKTOP" => "Desktop",
-        "DOWNLOAD" => "Downloads",
-        "TEMPLATES" => "Templates",
-        "PUBLICSHARE" => "Public",
-        "DOCUMENTS" => "Documents",
-        "MUSIC" => "Music",
-        "PICTURES" => "Pictures",
-        "VIDEOS" => "Videos",
-        _ => return None,
-    })
-}
+use crate::platform::UserDir;
 
 /// Parse `user-dirs.dirs` content. Returns key → absolute path; disabled
 /// entries (`$HOME/`) are omitted.
@@ -91,9 +68,10 @@ pub fn parse_defaults(text: &str, home: &Path) -> BTreeMap<String, PathBuf> {
     out
 }
 
-/// Full resolution for one key, in spec order. Reads the files under `config_home`
-/// and `etc_xdg` so tests can point them at fixtures.
-pub fn resolve_all(home: &Path, config_home: &Path, etc_xdg: &Path) -> BTreeMap<String, PathBuf> {
+/// Full resolution of every `UserDir`, in spec order. Reads the files under
+/// `config_home` and `etc_xdg` so tests can point them at fixtures. The
+/// result is always complete: English names are the final fallback.
+pub fn resolve_all(home: &Path, config_home: &Path, etc_xdg: &Path) -> BTreeMap<UserDir, PathBuf> {
     let user = std::fs::read_to_string(config_home.join("user-dirs.dirs"))
         .map(|t| parse_user_dirs(&t, home))
         .unwrap_or_default();
@@ -101,15 +79,14 @@ pub fn resolve_all(home: &Path, config_home: &Path, etc_xdg: &Path) -> BTreeMap<
         .map(|t| parse_defaults(&t, home))
         .unwrap_or_default();
     let mut out = BTreeMap::new();
-    for key in KEYS {
+    for d in UserDir::ALL {
+        let key = d.xdg_key();
         let path = user
             .get(key)
             .cloned()
             .or_else(|| defaults.get(key).cloned())
-            .or_else(|| english_default(key).map(|d| home.join(d)));
-        if let Some(p) = path {
-            out.insert(key.to_string(), p);
-        }
+            .unwrap_or_else(|| home.join(d.english_name()));
+        out.insert(d, path);
     }
     out
 }
@@ -176,13 +153,13 @@ mod tests {
         )
         .unwrap();
         let m = resolve_all(&home, &cfg, &etc);
-        assert_eq!(m["VIDEOS"], home.join("Vidéos"), "user file wins");
+        assert_eq!(m[&UserDir::Video], home.join("Vidéos"), "user file wins");
         assert_eq!(
-            m["DOCUMENTS"],
+            m[&UserDir::Documents],
             home.join("Dokumente"),
             "defaults file second"
         );
-        assert_eq!(m["MUSIC"], home.join("Music"), "English last");
-        assert_eq!(m.len(), 8);
+        assert_eq!(m[&UserDir::Music], home.join("Music"), "English last");
+        assert_eq!(m.len(), 7);
     }
 }
