@@ -53,7 +53,7 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -130,7 +130,7 @@ jobs:
       # strips a leading v either way.
       VERSION: ${{ inputs.version || github.ref_name }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Mint tap app token
         id: tap-token
         uses: actions/create-github-app-token@v3
