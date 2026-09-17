@@ -13,7 +13,7 @@ categories = ["command-line-utilities"]
 
 [dependencies]
 anyhow = "1"
-bip39 = { version = "2", features = ["std", "zeroize"] }
+bip39 = { version = "3", features = ["std", "zeroize"] }
 clap = { version = "4.6", features = ["derive", "env", "wrap_help"] }
 directories = "6"
 getrandom = "0.4"
